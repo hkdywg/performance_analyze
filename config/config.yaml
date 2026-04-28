@@ -1,0 +1,51 @@
+#===============================================================================
+# 图形显示应用程序性能分析 - 配置文件
+#
+# 使用此文件配置SSH远程连接和目标应用程序信息
+#===============================================================================
+
+# SSH连接配置
+ssh:
+  # 远程主机IP地址
+  host: "172.29.4.201"
+
+  # SSH端口 (默认: 22)
+  port: 22
+
+  # SSH用户名
+  user: "root"
+
+  # SSH密码 (推荐使用密钥认证，留空则使用密钥)
+  # password: "your_password"
+
+  # SSH密钥路径 (优先使用密钥认证)
+  key_path: "~/.ssh/id_rsa"
+
+# 目标应用程序配置
+target:
+  # 应用程序名称 (用于显示)
+  app_name: "kanzi"
+
+  # 进程匹配模式 (用于grep查找进程)
+  # 支持正则表达式，如 "my_app|my_client"
+  process_pattern: "my_graphics*"
+
+  # 显示服务器类型: "wayland" 或 "drm"
+  # wayland: 使用Wayland compositor (如Weston)
+  # drm: 直接操作DRM设备 (无compositor)
+  display_server: "drm"
+
+  # Compositor名称 (如weston, sway等)
+  compositor: "weston"
+
+# 分析参数配置
+analysis:
+  # 采样持续时间 (秒)
+  duration: 30
+
+  # 采样间隔 (秒)
+  interval: 1
+
+  # 报告输出目录
+  output_dir: "./report"
+
