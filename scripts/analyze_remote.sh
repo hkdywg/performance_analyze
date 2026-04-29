@@ -795,19 +795,13 @@ print('JSON summary generated')
 # 主函数
 #-------------------------------------------------------------------------------
 main() {
-    echo "========================================"
-    echo "  图形显示应用程序性能分析 - 远程采集"
-    echo "========================================"
-    echo ""
     
     #check_dependencies
     load_config
     setup_output
     test_connection
     
-    echo ""
     log_info "开始采集性能数据..."
-    echo ""
     
     collect_system_info
     collect_memory_info
@@ -833,14 +827,7 @@ main() {
 
     generate_json_summary
     
-    echo ""
-    echo "========================================"
-    log_success "数据采集完成!"
-    echo "========================================"
-    echo ""
     log_info "采集的数据保存在: ${OUTPUT_DIR}"
-    log_info "下一步: 运行 generate_report.py 生成HTML报告"
-    echo ""
 }
 
 # 执行主函数
