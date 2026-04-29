@@ -190,18 +190,17 @@ load_config() {
 #-------------------------------------------------------------------------------
 ssh_cmd() {
     local cmd="$1"
-    
+
     # 解析密钥路径为绝对路径
     local ssh_key_file=""
     if [ -n "$SSH_KEY" ]; then
         ssh_key_file=$(eval echo "$SSH_KEY")
-        # 检查密钥文件是否存在
         if [ ! -f "$ssh_key_file" ]; then
             ssh_key_file=""
         fi
     fi
-    
-    # 优先使用密钥认证（如果密钥文件存在且有效）
+
+    # 优先使用密钥认证
     if [ -n "$ssh_key_file" ]; then
         if ssh -p "$SSH_PORT" -i "$ssh_key_file" \
             -o StrictHostKeyChecking=no \
@@ -212,69 +211,85 @@ ssh_cmd() {
             return 0
         fi
     fi
-    
-    # 其次尝试使用 sshpass（如果配置了密码且 sshpass 可用）
+
+    # 使用 sshpass（最可靠）
     if [ -n "$SSH_PASS" ] && command -v sshpass &> /dev/null; then
-        if sshpass -p "$SSH_PASS" ssh -p "$SSH_PORT" \
+        sshpass -p "$SSH_PASS" ssh -p "$SSH_PORT" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
-            "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null; then
-            return 0
-        fi
+            "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null
+        return $?
     fi
-    
-    # 使用 Python 的 pexpect 处理交互式 SSH 认证
+
+    # 使用 Python paramiko（如果可用）
     if [ -n "$SSH_PASS" ]; then
-        # 创建临时 Python 脚本文件
-        local ssh_script
-        ssh_script=$(mktemp)
-        
-        cat > "$ssh_script" << 'PYEOF'
+        # 创建临时Python脚本
+        local py_script
+        py_script=$(mktemp /tmp/ssh_cmd_XXXXXX.py)
+
+        cat > "$py_script" << 'PYEOF'
 #!/usr/bin/env python3
-import os
 import sys
+import os
 
 host = os.environ.get("SSH_HOST", "")
-port = os.environ.get("SSH_PORT", "22")
+port = int(os.environ.get("SSH_PORT", "22"))
 user = os.environ.get("SSH_USER", "")
 password = os.environ.get("SSH_PASS", "")
-cmd = sys.argv[1] if len(sys.argv) > 1 else "echo test"
+cmd = sys.argv[1] if len(sys.argv) > 1 else "true"
 
 try:
-    import pexpect
-    child = pexpect.spawn(
-        "ssh -p %s -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s %s" % (port, user, host, cmd),
-        timeout=30, encoding="utf-8"
-    )
-    child.expect(["password:", "yes/no"], timeout=10)
-    if "password" in str(child.after):
-        child.sendline(password)
-    else:
-        child.sendline("yes")
-        child.expect("password:", timeout=10)
-        child.sendline(password)
-    output = child.read()
-    child.close()
-    print(output, file=sys.stdout, flush=True)
-except Exception:
+    import paramiko
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(hostname=host, port=port, username=user, password=password, timeout=30, allow_agent=False, look_for_keys=False)
+    stdin, stdout, stderr = client.exec_command(cmd, timeout=60)
+    output = stdout.read().decode('utf-8', errors='ignore')
+    error = stderr.read().decode('utf-8', errors='ignore')
+    client.close()
+    if error and not output:
+        sys.stderr.write(error)
+    sys.stdout.write(output)
+except Exception as e:
     sys.exit(1)
 PYEOF
-        
-        chmod +x "$ssh_script"
-        
-        # 设置环境变量并执行脚本
+
+        chmod +x "$py_script"
         export SSH_HOST SSH_PORT SSH_USER SSH_PASS
-        output=$("$ssh_script" "$cmd" 2>/dev/null)
+        "$py_script" "$cmd"
         local result=$?
-        rm -f "$ssh_script"
-        
-        if [ $result -eq 0 ] && [ -n "$output" ]; then
-            echo "$output"
-            return 0
-        fi
+        rm -f "$py_script"
+        return $result
     fi
-    
-    # 最后尝试无密码交互式连接
+
+    # 使用 expect 作为最后方案
+    if [ -n "$SSH_PASS" ] && command -v expect &> /dev/null; then
+        expect -c "
+            set timeout 30
+            spawn ssh -p ${SSH_PORT} -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} ${cmd}
+            expect {
+                \"password:\" {
+                    send \"${SSH_PASS}\r\"
+                    expect eof
+                }
+                \"yes/no\" {
+                    send \"yes\r\"
+                    expect \"password:\"
+                    send \"${SSH_PASS}\r\"
+                    expect eof
+                }
+                timeout {
+                    exit 1
+                }
+                eof {
+                    exit 1
+                }
+            }
+        " 2>/dev/null
+        return $?
+    fi
+
+    # 最后尝试无密码连接
     ssh -p "$SSH_PORT" \
         -o StrictHostKeyChecking=no \
         -o ConnectTimeout=10 \
@@ -413,13 +428,16 @@ collect_drm_info() {
 collect_app_info() {
     log_info "采集应用程序信息..."
     
-    # 查找目标进程
+    # 查找目标进程 - 多种方式获取PID
     ssh_cmd "ps aux | grep -E '${PROCESS_PATTERN}' | grep -v grep" > "${OUTPUT_DIR}/app_process.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_process.txt"
-    
-    # 获取进程PID
-    APP_PID=$(ssh_cmd "pidof ${APP_NAME} 2>/dev/null || ps aux | grep -E '${PROCESS_PATTERN}' | grep -v grep | awk '{print \$2}' | head -1" 2>/dev/null || echo "")
-    
-    if [ -n "$APP_PID" ]; then
+
+    # 获取进程PID - 使用更可靠的方式
+    APP_PID=$(ssh_cmd "pgrep -f '${PROCESS_PATTERN}' 2>/dev/null | head -1 || pgrep '${APP_NAME}' 2>/dev/null | head -1 || ps aux | grep -E '${PROCESS_PATTERN}' | grep -v grep | awk '{print \$2}' | head -1" 2>/dev/null | tr -d '\r\n' || echo "")
+
+    # 清理PID中的非数字字符，只保留纯数字
+    APP_PID=$(echo "$APP_PID" | tr -cd '[:digit:]')
+
+    if [ -n "$APP_PID" ] && [ "$APP_PID" != "N/A" ] && [ "$APP_PID" != "" ]; then
         log_info "找到进程PID: ${APP_PID}"
         
         # 进程详细信息
@@ -468,6 +486,189 @@ collect_system_load() {
     ssh_cmd 'mpstat -P ALL 1 3' > "${OUTPUT_DIR}/mpstat.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/mpstat.txt"
     
     log_success "系统负载信息采集完成"
+}
+
+#-------------------------------------------------------------------------------
+# 采集火焰图数据 (perf)
+#-------------------------------------------------------------------------------
+collect_flamegraph_data() {
+    log_info "采集火焰图数据..."
+
+    if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ] || [ "$APP_PID" = "" ]; then
+        log_warning "未找到目标进程PID，跳过火焰图采集"
+        echo "N/A" > "${OUTPUT_DIR}/perf_record.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
+        echo "N/A" > "${OUTPUT_DIR}/flamegraph.svg"
+        echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+        return
+    fi
+
+    # 检查perf是否可用
+    local perf_available=$(ssh_cmd "which perf 2>/dev/null || echo 'not_found'" | tr -d '\r\n')
+    if [ "$perf_available" = "not_found" ]; then
+        log_warning "perf工具不可用，尝试使用其他方法"
+        # 尝试使用 /proc/profile 或其他替代方案
+        collect_stack_traces_alternative
+        return
+    fi
+
+    log_info "使用perf record采集PID=${APP_PID}的调用栈..."
+
+    # 清理旧数据
+    ssh_cmd "rm -f /tmp/perf.data"
+
+    # 使用perf record采集数据（系统级采集，指定输出文件）
+    # 使用nohup确保命令在远程后台运行
+    ssh_cmd "rm -f /tmp/perf.data && nohup sh -c 'perf record -F 99 -a -g -o /tmp/perf.data -- sleep ${DURATION}' > /tmp/perf.log 2>&1 &"
+    log_info "perf record正在后台运行..."
+
+    # 等待采集完成
+    sleep $((DURATION + 5))
+
+    # 获取perf.data文件
+    local perf_data_exists=$(ssh_cmd "ls -la /tmp/perf.data 2>/dev/null | wc -l" | tr -d '\r\n')
+    if [ "$perf_data_exists" != "0" ] && [ -n "$perf_data_exists" ]; then
+        # 检查文件大小
+        local perf_size=$(ssh_cmd "stat -c%s /tmp/perf.data 2>/dev/null" | tr -d '\r\n')
+        log_info "perf.data 大小: ${perf_size} bytes"
+
+        # 生成perf报告
+        ssh_cmd "perf report --stdio --no-children -g none -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
+
+        # 生成调用栈文本（用于火焰图）
+        ssh_cmd "perf script -i /tmp/perf.data 2>/dev/null | stackcollapse-perf.pl 2>/dev/null || perf script -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/stack_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+
+        log_success "火焰图数据采集完成"
+    else
+        log_warning "perf record未能生成数据文件"
+        echo "采集失败" > "${OUTPUT_DIR}/perf_record.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
+        echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# 备选方案：采集调用栈（不使用perf）
+#-------------------------------------------------------------------------------
+collect_stack_traces_alternative() {
+    log_info "使用备选方案采集调用栈..."
+
+    if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ]; then
+        echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+        return
+    fi
+
+    # 使用 /proc/PID/stack 获取内核栈
+    ssh_cmd "cat /proc/${APP_PID}/stack 2>/dev/null" > "${OUTPUT_DIR}/kernel_stack.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/kernel_stack.txt"
+
+    # 获取线程栈信息
+    local tids=$(ssh_cmd "ls /proc/${APP_PID}/task/ 2>/dev/null" | tr -d '\r\n' || echo "")
+    if [ -n "$tids" ]; then
+        ssh_cmd "for tid in ${tids}; do echo \"=== TID: \$tid ===\"; cat /proc/${APP_PID}/task/\$tid/stack 2>/dev/null; done" > "${OUTPUT_DIR}/thread_stacks.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/thread_stacks.txt"
+    fi
+
+    # 尝试使用 eBPF / funccount（如可用）
+    local bcc_available=$(ssh_cmd "which funccount 2>/dev/null || echo 'not_found'" | tr -d '\r\n')
+    if [ "$bcc_available" != "not_found" ]; then
+        log_info "使用 BCC/funccount 采集函数调用频率..."
+        ssh_cmd "funccount -d 5 'gl*' 'egl*' 'drm*' 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/function_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/function_counts.txt"
+    else
+        echo "N/A" > "${OUTPUT_DIR}/function_counts.txt"
+    fi
+
+    # 使用 strace 采样（短时间）
+    log_info "使用strace采样系统调用..."
+    ssh_cmd "timeout 5 strace -p ${APP_PID} -c -f 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/syscall_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/syscall_counts.txt"
+
+    log_success "备选方案数据采集完成"
+}
+
+#-------------------------------------------------------------------------------
+# 采集 OpenGL/EGL/DRM 调用信息
+#-------------------------------------------------------------------------------
+collect_graphics_traces() {
+    log_info "采集图形API调用信息..."
+
+    if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ]; then
+        log_warning "未找到目标进程PID，跳过图形API采集"
+        echo "N/A" > "${OUTPUT_DIR}/opengl_info.txt"
+        echo "N/A" > "${OUTPUT_DIR}/egl_info.txt"
+        echo "N/A" > "${OUTPUT_DIR}/drm_info.txt"
+        echo "N/A" > "${OUTPUT_DIR}/graphics_env.txt"
+        return
+    fi
+
+    # 获取图形环境变量
+    ssh_cmd "cat /proc/${APP_PID}/environ 2>/dev/null | tr '\0' '\n' | grep -E 'DISPLAY|WAYLAND|EGL|GLX|MESA'" > "${OUTPUT_DIR}/graphics_env.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/graphics_env.txt"
+
+    # 获取OpenGL信息（如应用有显示连接）
+    ssh_cmd "export DISPLAY=:0; glxinfo -B 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/opengl_info.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/opengl_info.txt"
+
+    # 获取EGL信息
+    ssh_cmd "export EGL_LOG_LEVEL=info; cat /sys/kernel/debug/dri/0/state 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/drm_state_debug.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/drm_state_debug.txt"
+
+    # DRM统计信息
+    ssh_cmd "cat /sys/kernel/debug/dri/0/clients 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/drm_clients.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/drm_clients.txt"
+
+    # GPU内存分配信息
+    ssh_cmd "cat /sys/kernel/debug/dri/0/mm 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/gpu_memory_allocs.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/gpu_memory_allocs.txt"
+
+    # Vulkan信息（如可用）
+    local vulkan_available=$(ssh_cmd "which vulkaninfo 2>/dev/null || echo 'not_found'" | tr -d '\r\n')
+    if [ "$vulkan_available" != "not_found" ]; then
+        ssh_cmd "vulkaninfo --summary 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/vulkan_info.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/vulkan_info.txt"
+    else
+        echo "N/A" > "${OUTPUT_DIR}/vulkan_info.txt"
+    fi
+
+    # 使用 ftrace 追踪 DRM 调用（如有权限）
+    collect_drm_traces
+
+    log_success "图形API信息采集完成"
+}
+
+#-------------------------------------------------------------------------------
+# 采集 DRM 调用追踪
+#-------------------------------------------------------------------------------
+collect_drm_traces() {
+    log_info "采集DRM调用追踪..."
+
+    # 检查ftrace是否可用
+    local trace_available=$(ssh_cmd "[ -d /sys/kernel/debug/tracing ] && echo 'available' || echo 'not_available'" | tr -d '\r\n')
+    if [ "$trace_available" != "available" ]; then
+        log_warning "ftrace不可用，跳过DRM追踪"
+        echo "N/A" > "${OUTPUT_DIR}/drm_traces.txt"
+        return
+    fi
+
+    # 检查是否有写权限
+    local can_write=$(ssh_cmd "echo 1 > /sys/kernel/debug/tracing/tracing_on 2>/dev/null && echo 'yes' || echo 'no'" | tr -d '\r\n')
+    if [ "$can_write" != "yes" ]; then
+        log_warning "无ftrace写入权限，跳过DRM追踪"
+        echo "权限不足" > "${OUTPUT_DIR}/drm_traces.txt"
+        return
+    fi
+
+    # 设置ftrace追踪DRM事件
+    ssh_cmd "cd /sys/kernel/debug/tracing && \
+        echo nop > current_tracer && \
+        echo 0 > tracing_on && \
+        echo > trace && \
+        echo 1 > events/drm/drm_vblank_event/enable 2>/dev/null || true && \
+        echo 1 > events/drm/drm_flip_complete/enable 2>/dev/null || true && \
+        echo 1 > events/i915/enable 2>/dev/null || true && \
+        echo 1 > tracing_on && \
+        sleep ${DURATION} && \
+        echo 0 > tracing_on && \
+        cat trace" > "${OUTPUT_DIR}/drm_traces.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/drm_traces.txt"
+
+    # 恢复ftrace设置
+    ssh_cmd "cd /sys/kernel/debug/tracing && \
+        echo nop > current_tracer && \
+        echo > events/enable && \
+        echo 0 > tracing_on 2>/dev/null || true" 2>/dev/null
+
+    log_success "DRM追踪采集完成"
 }
 
 #-------------------------------------------------------------------------------
@@ -564,6 +765,13 @@ main() {
     
     collect_app_info
     collect_system_load
+
+    # 火焰图数据采集
+    collect_flamegraph_data
+
+    # 图形API追踪
+    collect_graphics_traces
+
     generate_json_summary
     
     echo ""
