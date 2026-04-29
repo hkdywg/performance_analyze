@@ -211,10 +211,6 @@ ssh_cmd() {
             "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null; then
             return 0
         fi
-        # 密钥认证失败，继续尝试其他方式
-
-        log_info "  ----1"
-        log_info "  key is $ssh_key_file"
     fi
     
     # 其次尝试使用 sshpass（如果配置了密码且 sshpass 可用）
@@ -225,36 +221,57 @@ ssh_cmd() {
             "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null; then
             return 0
         fi
-        log_info "  ----2"
     fi
     
-    log_info "  $SSH_PASS $SSH_USER $SSH_PORT"
-    # 使用 expect 处理交互式认证
-    if command -v expect &> /dev/null && [ -n "$SSH_PASS" ]; then
-        log_info "----------ss"
-        if expect -c "
-            set timeout 30
-            spawn ssh -p $SSH_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${SSH_USER}@${SSH_HOST} $cmd
-            expect {
-                \"password:\" {
-                    stty -echo
-                    send \"$SSH_PASS\r\"
-                    stty echo
-                }
-                \"(yes/no)?\" {
-                    send \"yes\r\"
-                    expect \"password:\"
-                    stty -echo
-                    send \"$SSH_PASS\r\"
-                    stty echo
-                }
-                eof
-            }
-        " 2>/dev/null | grep -v "spawn\|expect\|send\|stty" > /dev/null; then
+    # 使用 Python 的 pexpect 处理交互式 SSH 认证
+    if [ -n "$SSH_PASS" ]; then
+        # 创建临时 Python 脚本文件
+        local ssh_script
+        ssh_script=$(mktemp)
+        
+        cat > "$ssh_script" << 'PYEOF'
+#!/usr/bin/env python3
+import os
+import sys
+
+host = os.environ.get("SSH_HOST", "")
+port = os.environ.get("SSH_PORT", "22")
+user = os.environ.get("SSH_USER", "")
+password = os.environ.get("SSH_PASS", "")
+cmd = sys.argv[1] if len(sys.argv) > 1 else "echo test"
+
+try:
+    import pexpect
+    child = pexpect.spawn(
+        "ssh -p %s -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s %s" % (port, user, host, cmd),
+        timeout=30, encoding="utf-8"
+    )
+    child.expect(["password:", "yes/no"], timeout=10)
+    if "password" in str(child.after):
+        child.sendline(password)
+    else:
+        child.sendline("yes")
+        child.expect("password:", timeout=10)
+        child.sendline(password)
+    output = child.read()
+    child.close()
+    print(output, file=sys.stdout, flush=True)
+except Exception:
+    sys.exit(1)
+PYEOF
+        
+        chmod +x "$ssh_script"
+        
+        # 设置环境变量并执行脚本
+        export SSH_HOST SSH_PORT SSH_USER SSH_PASS
+        output=$("$ssh_script" "$cmd" 2>/dev/null)
+        local result=$?
+        rm -f "$ssh_script"
+        
+        if [ $result -eq 0 ] && [ -n "$output" ]; then
+            echo "$output"
             return 0
         fi
-
-        log_info "  ----3"
     fi
     
     # 最后尝试无密码交互式连接
@@ -262,8 +279,6 @@ ssh_cmd() {
         -o StrictHostKeyChecking=no \
         -o ConnectTimeout=10 \
         "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null
-
-        log_info "  ----4"
 }
 
 #-------------------------------------------------------------------------------
@@ -536,9 +551,6 @@ main() {
     echo ""
     log_info "开始采集性能数据..."
     echo ""
-
-    ssh_cmd 'uname -a'
-    exit
     
     collect_system_info
     collect_memory_info
