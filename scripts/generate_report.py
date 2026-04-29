@@ -264,6 +264,31 @@ HTML_HEADER = """<!DOCTYPE html>
             margin-top: 5px;
         }}
         
+        /* 图表容器 */
+        .chart-container {{
+            margin: 20px 0;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        
+        .chart-container h3 {{
+            margin-bottom: 15px;
+            color: #333;
+        }}
+        
+        .chart-container canvas {{
+            max-height: 300px;
+        }}
+        
+        .no-data {{
+            text-align: center;
+            color: #999;
+            padding: 40px;
+            font-style: italic;
+        }}
+        
         /* 页脚 */
         .footer {{
             text-align: center;
@@ -366,11 +391,23 @@ class PerformanceReportGenerator:
         if json_files:
             with open(json_files[0], 'r', encoding='utf-8') as f:
                 self.data = json.load(f)
+            
+            # 也加载 CSV 文件（补充数据）
+            self._load_csv_files()
         else:
             # 加载所有txt文件
             self._load_text_files()
         
         return bool(self.data)
+    
+    def _load_csv_files(self):
+        """加载 CSV 文件"""
+        for csv_file in self.data_dir.glob("*.csv"):
+            try:
+                with open(csv_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    self.data["files"][csv_file.name] = f.read()
+            except Exception as e:
+                print(f"读取 {csv_file.name} 失败: {e}")
     
     def _load_text_files(self):
         """从文本文件加载数据"""
@@ -918,6 +955,9 @@ class PerformanceReportGenerator:
         # 应用性能
         html += self._generate_app_section()
         
+        # 性能趋势图表
+        html += self._generate_performance_chart_section()
+        
         # 问题诊断
         html += self._generate_issues_section()
 
@@ -929,6 +969,85 @@ class PerformanceReportGenerator:
 
         # 优化建议
         html += self._generate_suggestions_section()
+        
+        # 添加 Chart.js 和图表渲染脚本
+        html += '''
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // 综合性能图表（CPU + 内存）
+        if (typeof perfChartData !== 'undefined' && perfChartData.times.length > 0) {
+            const perfCtx = document.getElementById('perfChart');
+            if (perfCtx) {
+                new Chart(perfCtx, {
+                    type: 'line',
+                    data: {
+                        labels: perfChartData.times.map(t => t + 's'),
+                        datasets: [
+                            {
+                                label: 'CPU %',
+                                data: perfChartData.appCpu,
+                                borderColor: 'rgb(255, 99, 132)',
+                                backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                                tension: 0.3,
+                                fill: true,
+                                yAxisID: 'y'
+                            },
+                            {
+                                label: 'RSS (MB)',
+                                data: perfChartData.appRss,
+                                borderColor: 'rgb(75, 192, 192)',
+                                backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                                tension: 0.3,
+                                fill: true,
+                                yAxisID: 'y1'
+                            },
+                            {
+                                label: 'VSZ (MB)',
+                                data: perfChartData.appVsz,
+                                borderColor: 'rgb(153, 102, 255)',
+                                backgroundColor: 'rgba(153, 102, 255, 0.1)',
+                                tension: 0.3,
+                                fill: false,
+                                yAxisID: 'y1'
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        interaction: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        plugins: {
+                            legend: { position: 'top' },
+                            tooltip: { callbacks: {} }
+                        },
+                        scales: {
+                            y: {
+                                type: 'linear',
+                                display: true,
+                                position: 'left',
+                                beginAtZero: true,
+                                max: 100,
+                                title: { display: true, text: 'CPU %' }
+                            },
+                            y1: {
+                                type: 'linear',
+                                display: false,
+                                position: 'right',
+                                beginAtZero: true,
+                                suggestedMax: maxMemValue,
+                                grid: { drawOnChartArea: false }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    });
+    </script>
+'''
         
         # 页脚
         html += HTML_FOOTER.format(timestamp=timestamp)
@@ -1320,6 +1439,100 @@ class PerformanceReportGenerator:
             
             <h3>内存映射概览</h3>
             <pre>{self._escape_html(app_smaps[:1500]) if app_smaps != 'N/A' else 'N/A'}</pre>
+        </section>
+        """
+    
+    def _generate_performance_chart_section(self) -> str:
+        """生成 CPU 和内存折线图部分"""
+        perf_samples = self.data.get("files", {}).get("perf_samples.csv", "N/A")
+        
+        if perf_samples == "N/A" or not perf_samples.strip():
+            return """
+        <section id="perf-chart" class="card">
+            <h2>3. 性能趋势</h2>
+            <div class="no-data">暂无采样数据</div>
+        </section>
+            """
+        
+        # 解析 CSV 数据
+        lines = perf_samples.strip().split('\n')
+        if len(lines) < 2:
+            return """
+        <section id="perf-chart" class="card">
+            <h2>3. 性能趋势</h2>
+            <div class="no-data">采样数据不足</div>
+        </section>
+            """
+        
+        # 解析表头和数据
+        header = lines[0].split(',')
+        time_data = []
+        app_cpu_data = []
+        app_rss_data = []
+        app_vsz_data = []
+        
+        for line in lines[1:]:
+            parts = line.split(',')
+            if len(parts) >= 4:
+                time_data.append(parts[0])
+                # 转换字符串为浮点数
+                try:
+                    app_cpu_data.append(float(parts[1]))
+                except:
+                    app_cpu_data.append(0)
+                try:
+                    # RSS 可能是 KB 或带单位的字符串
+                    rss_val = parts[2].strip()
+                    if 'm' in rss_val.lower() or 'k' in rss_val.lower():
+                        # 处理 "626m" 或 "100K" 格式
+                        rss_val = rss_val.lower().replace('m', '').replace('k', '')
+                        app_rss_data.append(float(rss_val))
+                    else:
+                        app_rss_data.append(float(rss_val))
+                except:
+                    app_rss_data.append(0)
+                try:
+                    vsz_val = parts[3].strip()
+                    if 'm' in vsz_val.lower() or 'k' in vsz_val.lower():
+                        vsz_val = vsz_val.lower().replace('m', '').replace('k', '')
+                        app_vsz_data.append(float(vsz_val))
+                    else:
+                        app_vsz_data.append(float(vsz_val))
+                except:
+                    app_vsz_data.append(0)
+        
+        if not time_data:
+            return """
+        <section id="perf-chart" class="card">
+            <h2>3. 性能趋势</h2>
+            <div class="no-data">无法解析采样数据</div>
+        </section>
+            """
+        
+        # 计算内存数据的最大值用于Y轴
+        max_mem = max(max(app_rss_data) if app_rss_data else 0, max(app_vsz_data) if app_vsz_data else 0)
+        max_mem = max_mem * 1.1 if max_mem > 0 else 100  # 留10%余量
+        
+        # 生成 JSON 数据供 JavaScript 使用
+        import json
+        
+        return f"""
+        <section id="perf-chart" class="card">
+            <h2>3. 性能趋势</h2>
+            
+            <div class="chart-container">
+                <h3>应用性能趋势 (CPU、内存)</h3>
+                <canvas id="perfChart"></canvas>
+                <script>
+                var perfChartData = {json.dumps({
+                    'times': time_data,
+                    'appCpu': app_cpu_data,
+                    'appRss': app_rss_data,
+                    'appVsz': app_vsz_data
+                })};
+                var maxMemValue = {max_mem};
+                </script>
+            </div>
         </section>
         """
     

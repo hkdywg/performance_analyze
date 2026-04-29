@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #==============================================================================
-# 图形显示应用程序性能分析 - 远程数据采集脚本
-# 用于通过SSH连接远程嵌入式设备，采集GPU、Wayland/Weston及应用程序性能数据
+# AR-HUD应用程序性能分析 - 远程数据采集脚本
+# 用于通过SSH连接远程嵌入式设备，采集操作系统及应用程序性能数据
 #==============================================================================
 
 set -e
@@ -470,6 +470,62 @@ collect_app_info() {
 }
 
 #-------------------------------------------------------------------------------
+# 周期性采样 CPU 和内存数据（用于折线图）
+#-------------------------------------------------------------------------------
+collect_performance_samples() {
+    log_info "开始周期性采样 CPU 和内存数据..."
+    log_info "采样参数: 持续时间=${DURATION}s, 间隔=${INTERVAL}s"
+    
+    if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ] || [ "$APP_PID" = "" ]; then
+        log_warning "未找到目标进程PID，跳过采样"
+        echo "时间(s),CPU%,RSS(MB),VSZ(MB)" > "${OUTPUT_DIR}/perf_samples.csv"
+        echo "N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+        return
+    fi
+    
+    # 计算采样次数
+    local sample_count=$((DURATION / INTERVAL))
+    [ "$sample_count" -lt 1 ] && sample_count=1
+    
+    # 创建CSV文件
+    echo "时间(s),CPU%,RSS(MB),VSZ(MB)" > "${OUTPUT_DIR}/perf_samples.csv"
+    
+    local elapsed=0
+    local iteration=0
+    
+    while [ "$elapsed" -lt "$DURATION" ]; do
+        iteration=$((iteration + 1))
+        local current_time=$((iteration * INTERVAL))
+        
+        # 获取进程 CPU 和内存 - 使用ps获取更可靠的格式
+        # 格式: PID COMMAND %CPU %MEM RSS VSZ
+        local app_data=$(ssh_cmd "ps -p ${APP_PID} -o pid,comm,%cpu,%mem,rss,vsz --no-headers 2>/dev/null" | tr -s ' ')
+        if [ -n "$app_data" ]; then
+            # 解析 ps 输出: PID COMMAND %CPU %MEM RSS VSZ
+            local app_cpu=$(echo "$app_data" | awk '{print $3}')
+            local app_rss=$(echo "$app_data" | awk '{print $5}')  # RSS in KB
+            local app_vsz=$(echo "$app_data" | awk '{print $6}')  # VSZ in KB
+            
+            # 转换 RSS 和 VSZ 为 MB
+            local rss_mb=$(echo "$app_rss" | awk '{printf "%.1f", $1/1024}')
+            local vsz_mb=$(echo "$app_vsz" | awk '{printf "%.1f", $1/1024}')
+            
+            echo "${current_time},${app_cpu},${rss_mb},${vsz_mb}" >> "${OUTPUT_DIR}/perf_samples.csv"
+            log_info "采样 ${iteration}/${sample_count}: 时间=${current_time}s, CPU=${app_cpu}%, RSS=${rss_mb}MB"
+        else
+            echo "${current_time},N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+        fi
+        
+        elapsed=$((elapsed + INTERVAL))
+        if [ "$elapsed" -lt "$DURATION" ]; then
+            sleep "$INTERVAL"
+        fi
+    done
+    
+    log_success "周期性采样完成，共 ${iteration} 次采样"
+}
+
+#-------------------------------------------------------------------------------
 # 采集系统负载和进程信息
 #-------------------------------------------------------------------------------
 collect_system_load() {
@@ -715,14 +771,14 @@ if not output_dir:
 with open(output_file, 'r') as f:
     data = json.load(f)
 
-# 添加所有txt文件内容（排除JSON文件本身）
+# 添加所有txt和csv文件内容
 for filename in os.listdir(output_dir):
-    if filename.endswith('.txt'):
+    if filename.endswith('.txt') or filename.endswith('.csv'):
         filepath = os.path.join(output_dir, filename)
         try:
             with open(filepath, 'r') as f:
                 content = f.read()
-                data['files'][filename] = content[:50000]  # 限制大小
+                data['files'][filename] = content[:100000]  # 增大限制
         except Exception as e:
             data['files'][filename] = f'Error reading file: {e}'
 
@@ -765,6 +821,9 @@ main() {
     
     collect_app_info
     collect_system_load
+
+    # 周期性采样 CPU 和内存（用于折线图）
+    collect_performance_samples
 
     # 火焰图数据采集
     collect_flamegraph_data
