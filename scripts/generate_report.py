@@ -944,7 +944,7 @@ class PerformanceReportGenerator:
         
         return f"""
         <div class="header">
-            <h1>图形显示应用程序性能分析报告</h1>
+            <h1>AR-HUD应用程序性能分析报告</h1>
             <div class="subtitle">{app_name}</div>
             <div class="meta">
                 <div class="meta-item">主机: {host}</div>
@@ -1032,10 +1032,10 @@ class PerformanceReportGenerator:
         <section id="overview" class="card">
             <h2>1. 系统概览</h2>
             
-            <div class="grid">
+            <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
                 <div class="stat-box">
                     <div class="value">{cpu_count}</div>
-                    <div class="label">CPU核心数</div>
+                    <div class="label">CPU核芯</div>
                 </div>
                 <div class="stat-box">
                     <div class="value">{mem_total}</div>
@@ -1043,11 +1043,11 @@ class PerformanceReportGenerator:
                 </div>
                 <div class="stat-box">
                     <div class="value">{mem_used}</div>
-                    <div class="label">已用内存</div>
+                    <div class="label">已用</div>
                 </div>
                 <div class="stat-box">
                     <div class="value">{os_name[:15]}</div>
-                    <div class="label">操作系统</div>
+                    <div class="label">OS</div>
                 </div>
             </div>
             
@@ -1219,17 +1219,16 @@ class PerformanceReportGenerator:
         
         app_cpu_display = app_cpu_raw if app_cpu_raw and app_cpu_raw != "None" else "N/A"
         cpu_pct = "N/A"
-        mem_pct = "N/A"
         if app_cpu_display != "N/A":
             # 解析 top 输出格式: PID USER S VIRT RES SHR CPU% COMMAND
             # 示例: " 3198   309 root     S     626m 72.4   1 14.2 ./kanzi"
             top_match = re.search(r'\d+\s+\d+\s+\S+\s+\S+\s+\S+\s+([\d.]+)\s+\S+\s+([\d.]+)', app_cpu_display)
             if top_match:
-                mem_pct = f"{top_match.group(1)}%"
                 cpu_pct = f"{top_match.group(2)}%"
         
         # 提取内存信息 - 从 app_status.txt 读取 VmSize/VmRSS
         mem_rss = mem_vs = "N/A"
+        mem_pct = "N/A"
         if app_status and app_status != "N/A":
             # VmRSS: 物理内存
             rss_match = re.search(r"VmRSS:\s+(\d+)\s+kB", app_status)
@@ -1240,8 +1239,12 @@ class PerformanceReportGenerator:
                 rss_smaps = re.search(r"Rss:\s+(\d+)\s+kB", app_smaps)
                 if rss_smaps and not rss_match:
                     mem_rss = f"{int(rss_smaps.group(1)) / 1024:.0f} MB"
+                    rss_kb = int(rss_smaps.group(1))
                 elif rss_match:
                     mem_rss = f"{int(rss_match.group(1)) / 1024:.0f} MB"
+                    rss_kb = int(rss_match.group(1))
+                else:
+                    rss_kb = None
                 vs_smaps = re.search(r"VmSize:\s+(\d+)\s+kB", app_smaps)
                 if vs_smaps:
                     mem_vs = f"{int(vs_smaps.group(1)) / 1024:.0f} MB"
@@ -1249,6 +1252,32 @@ class PerformanceReportGenerator:
                     mem_vs = f"{int(vs_match.group(1)) / 1024:.0f} MB"
             elif vs_match:
                 mem_vs = f"{int(vs_match.group(1)) / 1024:.0f} MB"
+                if rss_match:
+                    mem_rss = f"{int(rss_match.group(1)) / 1024:.0f} MB"
+                    rss_kb = int(rss_match.group(1))
+                else:
+                    rss_kb = None
+            elif rss_match:
+                mem_rss = f"{int(rss_match.group(1)) / 1024:.0f} MB"
+                mem_vs = "N/A"
+                rss_kb = int(rss_match.group(1))
+            else:
+                rss_kb = None
+            
+                # 计算内存占比 = RSS / 系统总内存
+            # 从内存文件读取系统总内存
+            if rss_kb:
+                mem_info = self.data.get("files", {}).get("memory.txt", "")
+                if isinstance(mem_info, list):
+                    mem_info = '\n'.join(mem_info)
+                total_match = re.search(r'Mem:\s+([\d.]+)([KMGT])', mem_info)
+                if total_match:
+                    total_mem = float(total_match.group(1))
+                    unit = total_match.group(2)
+                    # 转换为 KB
+                    unit_to_kb = {'K': 1, 'M': 1024, 'G': 1024*1024, 'T': 1024*1024*1024}
+                    total_kb = int(total_mem * unit_to_kb.get(unit, 1024))
+                    mem_pct = f"{rss_kb / total_kb * 100:.1f}%"
         
         running = app_process != "N/A" and "grep" not in app_process.lower()
         
@@ -1259,7 +1288,7 @@ class PerformanceReportGenerator:
             <div class="grid">
                 <div class="stat-box">
                     <div class="value">{"PID: " + app_pid if app_pid and app_pid != "N/A" else "未运行"}</div>
-                    <div class="label">进程状态</div>
+                    <div class="label">PID</div>
                 </div>
                 <div class="stat-box">
                     <div class="value">{thread_count}</div>
@@ -1267,21 +1296,19 @@ class PerformanceReportGenerator:
                 </div>
                 <div class="stat-box">
                     <div class="value">{cpu_pct if cpu_pct != 'N/A' else 'N/A'}</div>
-                    <div class="label">CPU使用</div>
+                    <div class="label">CPU</div>
                 </div>
                 <div class="stat-box">
                     <div class="value">{mem_pct if mem_pct != 'N/A' else 'N/A'}</div>
                     <div class="label">内存占比</div>
                 </div>
-            </div>
-            <div class="grid">
                 <div class="stat-box">
-                    <div class="value">{mem_rss}</div>
-                    <div class="label">RSS内存</div>
+                    <div class="value">{mem_rss if mem_rss != 'N/A' else 'N/A'}</div>
+                    <div class="label">RSS</div>
                 </div>
                 <div class="stat-box">
-                    <div class="value">{mem_vs}</div>
-                    <div class="label">VSZ内存</div>
+                    <div class="value">{mem_vs if mem_vs != 'N/A' else 'N/A'}</div>
+                    <div class="label">VSZ</div>
                 </div>
             </div>
 
