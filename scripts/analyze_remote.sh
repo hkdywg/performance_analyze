@@ -443,15 +443,15 @@ collect_app_info() {
         # 进程详细信息
         ssh_cmd "cat /proc/${APP_PID}/status" > "${OUTPUT_DIR}/app_status.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_status.txt"
         ssh_cmd "cat /proc/${APP_PID}/smaps_rollup" > "${OUTPUT_DIR}/app_smaps.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_smaps.txt"
-        
-        # 进程CPU使用
-        ssh_cmd "pidstat -u -p ${APP_PID} ${INTERVAL} ${DURATION}" > "${OUTPUT_DIR}/app_cpu.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_cpu.txt"
-        
-        # 进程内存使用
-        ssh_cmd "pidstat -r -p ${APP_PID} ${INTERVAL} ${DURATION}" > "${OUTPUT_DIR}/app_memory.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_memory.txt"
-        
-        # 进程IO使用
-        ssh_cmd "pidstat -d -p ${APP_PID} ${INTERVAL} ${DURATION}" > "${OUTPUT_DIR}/app_io.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_io.txt"
+
+        # 进程CPU使用 - 使用top获取实时CPU和内存
+        ssh_cmd "top -b -n 1 | grep -E '^[[:space:]]*${APP_PID}'" > "${OUTPUT_DIR}/app_cpu.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_cpu.txt"
+
+        # 进程内存使用 - 使用top获取内存详情
+        ssh_cmd "top -b -n 1 | grep -E '^[[:space:]]*${APP_PID}' && cat /proc/${APP_PID}/status | grep -E 'VmRSS|VmSize|VmData|VmStk|VmPeak'" > "${OUTPUT_DIR}/app_memory.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_memory.txt"
+
+        # 进程IO使用 - 使用ps或/proc/io替代pidstat
+        ssh_cmd "cat /proc/${APP_PID}/io 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/app_io.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_io.txt"
         
         # 线程信息
         ssh_cmd "ps -eLf -p ${APP_PID}" > "${OUTPUT_DIR}/app_threads.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_threads.txt"

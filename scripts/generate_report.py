@@ -983,14 +983,44 @@ class PerformanceReportGenerator:
         # 解析CPU核心数
         cpu_count = nproc.strip() if nproc != "N/A" else "N/A"
         
-        # 提取内存信息
-        mem_match = re.search(r"Mem:\s+(\d+)\s+(\d+)", memory)
+        # 提取内存信息 - 支持 free -h (带单位) 和 free (纯数字，单位为KB)
         mem_total = mem_used = "N/A"
-        if mem_match:
-            total_kb = int(mem_match.group(1))
-            used_kb = int(mem_match.group(2))
-            mem_total = f"{total_kb / 1024 / 1024:.1f} GB"
-            mem_used = f"{used_kb / 1024 / 1024:.1f} GB"
+
+        # 尝试解析 free -h 输出 (如: 863.4M, 1.2G)
+        mem_match_h = re.search(r"Mem:\s+([\d.]+)([KMGT]?i?\s)", memory)
+        if mem_match_h:
+            total_val = float(mem_match_h.group(1))
+            total_unit = mem_match_h.group(2).strip()
+            # 转换为 GB
+            if 'T' in total_unit.upper():
+                total_gb = total_val * 1024
+            elif 'G' in total_unit.upper():
+                total_gb = total_val
+            elif 'M' in total_unit.upper():
+                total_gb = total_val / 1024
+            elif 'K' in total_unit.upper():
+                total_gb = total_val / 1024 / 1024
+            mem_total = f"{total_gb:.1f} GB"
+
+            # 解析已用内存
+            used_match = re.search(r"Mem:\s+[\d.]+[KMGT]?\s+([\d.]+)([KMGT]?)", memory)
+            if used_match:
+                used_val = float(used_match.group(1))
+                used_unit = used_match.group(2)
+                if 'G' in used_unit.upper():
+                    mem_used = f"{used_val:.1f} GB"
+                elif 'M' in used_unit.upper():
+                    mem_used = f"{used_val:.0f} MB"
+                elif 'K' in used_unit.upper():
+                    mem_used = f"{used_val:.0f} KB"
+        else:
+            # 尝试解析 free 输出 (纯数字，单位为KB)
+            mem_match = re.search(r"Mem:\s+(\d+)\s+(\d+)", memory)
+            if mem_match:
+                total_kb = int(mem_match.group(1))
+                used_kb = int(mem_match.group(2))
+                mem_total = f"{total_kb / 1024 / 1024:.1f} GB"
+                mem_used = f"{used_kb / 1024 / 1024:.1f} GB"
         
         # 解析OS信息
         os_name = "Linux"
@@ -1173,19 +1203,51 @@ class PerformanceReportGenerator:
         app_smaps = self.data.get("files", {}).get("app_smaps.txt", "N/A")
         app_pid = self.data.get("files", {}).get("app_pid.txt", "N/A").strip()
         
-        # 计算线程数
+        # 计算线程数 - 从 app_status.txt 读取
         thread_count = "N/A"
-        if app_threads and app_threads != "N/A":
-            thread_count = str(len([l for l in app_threads.split('\n') if l]))
+        if app_status and app_status != "N/A":
+            threads_match = re.search(r"Threads:\s+(\d+)", app_status)
+            if threads_match:
+                thread_count = threads_match.group(1)
         
-        # 提取内存信息
+        # 从 app_cpu.txt (top输出) 解析 CPU 使用率
+        # 处理可能的数组类型
+        if isinstance(app_cpu, list):
+            app_cpu_raw = ' '.join(app_cpu).strip()
+        else:
+            app_cpu_raw = str(app_cpu).strip() if app_cpu else "N/A"
+        
+        app_cpu_display = app_cpu_raw if app_cpu_raw and app_cpu_raw != "None" else "N/A"
+        cpu_pct = "N/A"
+        mem_pct = "N/A"
+        if app_cpu_display != "N/A":
+            # 解析 top 输出格式: PID USER S VIRT RES SHR CPU% COMMAND
+            # 示例: " 3198   309 root     S     626m 72.4   1 14.2 ./kanzi"
+            top_match = re.search(r'\d+\s+\d+\s+\S+\s+\S+\s+\S+\s+([\d.]+)\s+\S+\s+([\d.]+)', app_cpu_display)
+            if top_match:
+                mem_pct = f"{top_match.group(1)}%"
+                cpu_pct = f"{top_match.group(2)}%"
+        
+        # 提取内存信息 - 从 app_status.txt 读取 VmSize/VmRSS
         mem_rss = mem_vs = "N/A"
-        if app_smaps and app_smaps != "N/A":
-            rss_match = re.search(r"Rss:\s+(\d+)\s+kB", app_smaps)
-            vs_match = re.search(r"VmSize:\s+(\d+)\s+kB", app_smaps)
-            if rss_match:
-                mem_rss = f"{int(rss_match.group(1)) / 1024:.0f} MB"
-            if vs_match:
+        if app_status and app_status != "N/A":
+            # VmRSS: 物理内存
+            rss_match = re.search(r"VmRSS:\s+(\d+)\s+kB", app_status)
+            # VmSize: 虚拟内存
+            vs_match = re.search(r"VmSize:\s+(\d+)\s+kB", app_status)
+            # 或者尝试从 smaps 读取
+            if app_smaps and app_smaps != "N/A":
+                rss_smaps = re.search(r"Rss:\s+(\d+)\s+kB", app_smaps)
+                if rss_smaps and not rss_match:
+                    mem_rss = f"{int(rss_smaps.group(1)) / 1024:.0f} MB"
+                elif rss_match:
+                    mem_rss = f"{int(rss_match.group(1)) / 1024:.0f} MB"
+                vs_smaps = re.search(r"VmSize:\s+(\d+)\s+kB", app_smaps)
+                if vs_smaps:
+                    mem_vs = f"{int(vs_smaps.group(1)) / 1024:.0f} MB"
+                elif vs_match:
+                    mem_vs = f"{int(vs_match.group(1)) / 1024:.0f} MB"
+            elif vs_match:
                 mem_vs = f"{int(vs_match.group(1)) / 1024:.0f} MB"
         
         running = app_process != "N/A" and "grep" not in app_process.lower()
@@ -1204,6 +1266,16 @@ class PerformanceReportGenerator:
                     <div class="label">线程数</div>
                 </div>
                 <div class="stat-box">
+                    <div class="value">{cpu_pct if cpu_pct != 'N/A' else 'N/A'}</div>
+                    <div class="label">CPU使用</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{mem_pct if mem_pct != 'N/A' else 'N/A'}</div>
+                    <div class="label">内存占比</div>
+                </div>
+            </div>
+            <div class="grid">
+                <div class="stat-box">
                     <div class="value">{mem_rss}</div>
                     <div class="label">RSS内存</div>
                 </div>
@@ -1212,15 +1284,12 @@ class PerformanceReportGenerator:
                     <div class="label">VSZ内存</div>
                 </div>
             </div>
-            
-            <h3>进程列表</h3>
-            <pre>{self._escape_html(app_process[:1500]) if app_process != 'N/A' else '进程未运行'}</pre>
-            
-            <h3>CPU使用详情</h3>
-            <pre>{self._escape_html(app_cpu[:1500]) if app_cpu != 'N/A' else 'N/A'}</pre>
-            
-            <h3>内存使用详情</h3>
-            <pre>{self._escape_html(app_memory[:1500]) if app_memory != 'N/A' else 'N/A'}</pre>
+
+            <h3>进程信息 (top)</h3>
+            <pre>{self._escape_html(app_cpu[:1500]) if app_cpu and app_cpu != 'N/A' and app_cpu.strip() else 'N/A'}</pre>
+
+            <h3>内存详情 (VmRSS/VmSize)</h3>
+            <pre>{self._escape_html(app_memory[:1500]) if app_memory and app_memory != 'N/A' and app_memory.strip() else 'N/A'}</pre>
             
             <h3>内存映射概览</h3>
             <pre>{self._escape_html(app_smaps[:1500]) if app_smaps != 'N/A' else 'N/A'}</pre>
