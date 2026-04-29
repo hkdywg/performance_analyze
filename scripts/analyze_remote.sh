@@ -575,15 +575,16 @@ collect_flamegraph_data() {
     # 获取perf.data文件
     local perf_data_exists=$(ssh_cmd "ls -la /tmp/perf.data 2>/dev/null | wc -l" | tr -d '\r\n')
     if [ "$perf_data_exists" != "0" ] && [ -n "$perf_data_exists" ]; then
-        # 检查文件大小
-        local perf_size=$(ssh_cmd "stat -c%s /tmp/perf.data 2>/dev/null" | tr -d '\r\n')
         log_info "perf.data 大小: ${perf_size} bytes"
 
-        # 生成perf报告
-        ssh_cmd "perf report --stdio --no-children -g none -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
+        # 生成perf报告（带调用栈）
+        ssh_cmd "perf report --stdio -g none -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
 
         # 生成调用栈文本（用于火焰图）
         ssh_cmd "perf script -i /tmp/perf.data 2>/dev/null | stackcollapse-perf.pl 2>/dev/null || perf script -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/stack_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+
+        # 生成热点函数详细调用栈
+        generate_hot_functions_stacks
 
         log_success "火焰图数据采集完成"
     else
@@ -628,6 +629,95 @@ collect_stack_traces_alternative() {
     ssh_cmd "timeout 5 strace -p ${APP_PID} -c -f 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/syscall_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/syscall_counts.txt"
 
     log_success "备选方案数据采集完成"
+}
+
+#-------------------------------------------------------------------------------
+# 生成热点函数详细调用栈
+#-------------------------------------------------------------------------------
+generate_hot_functions_stacks() {
+    log_info "生成热点函数详细调用栈..."
+    
+    # 创建热点函数调用栈文件
+    {
+        echo "========================================"
+        echo "热点函数详细调用栈分析"
+        echo "========================================"
+        echo "采集时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "进程PID: ${APP_PID}"
+        echo "采样时长: ${DURATION}秒"
+        echo ""
+    } > "${OUTPUT_DIR}/hot_functions_stacks.txt"
+
+    # 获取热点函数列表（前20个）
+    local hot_functions=$(ssh_cmd "perf report --stdio -g none -i /tmp/perf.data 2>/dev/null | grep -E '^\s+[0-9]+\.' | head -20" 2>/dev/null | tr -d '\r')
+    
+    if [ -z "$hot_functions" ] || [ "$hot_functions" = "N/A" ]; then
+        echo "无法获取热点函数数据" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+        return
+    fi
+
+    {
+        echo "Top 20 热点函数:"
+        echo "----------------------------------------"
+        echo "$hot_functions"
+        echo ""
+        echo "========================================"
+        echo "热点函数调用栈详情"
+        echo "========================================"
+        echo ""
+    } >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+
+    # 使用 perf script 获取完整调用栈数据
+    local stack_data=$(ssh_cmd "perf script -i /tmp/perf.data --no-inline 2>/dev/null" 2>&1 | head -5000)
+    
+    # 提取函数名
+    local func_names=$(echo "$hot_functions" | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*' | sort -u | head -15)
+    
+    local func_count=1
+    for func in $func_names; do
+        # 跳过太短或太通用的函数名
+        [ ${#func} -lt 4 ] && continue
+        [[ "$func" == "unknown" ]] && continue
+        [[ "$func" == "[]" ]] && continue
+        
+        {
+            echo "----------------------------------------"
+            echo "[$func_count] 函数: $func"
+            echo "----------------------------------------"
+        } >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+        
+        # 查找该函数的调用栈
+        local func_stacks=$(echo "$stack_data" | grep -B 30 "$func" | head -35)
+        
+        if [ -n "$func_stacks" ]; then
+            echo "调用链 (最多显示30层):" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+            echo "$func_stacks" | sed 's/^/  /' >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+        else
+            echo "  无详细调用栈数据" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+        fi
+        
+        echo "" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+        func_count=$((func_count + 1))
+        [ $func_count -gt 10 ] && break
+    done
+
+    # 添加调用关系
+    {
+        echo "========================================"
+        echo "函数调用关系 (Caller -> Callee)"
+        echo "========================================"
+    } >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+    
+    # 使用 perf report --graph 生成调用关系
+    local call_graph=$(ssh_cmd "perf report --stdio --graph-function='.*' -g caller -i /tmp/perf.data 2>/dev/null | head -200" 2>&1 | tr -d '\r')
+    
+    if [ -n "$call_graph" ] && [ "$call_graph" != "N/A" ]; then
+        echo "$call_graph" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+    else
+        echo "  (调用关系数据不可用)" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+    fi
+
+    log_success "热点函数调用栈已保存到 hot_functions_stacks.txt"
 }
 
 #-------------------------------------------------------------------------------

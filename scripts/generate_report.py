@@ -228,7 +228,7 @@ HTML_HEADER = """<!DOCTYPE html>
             margin: 15px 0;
             border-radius: 0 5px 5px 0;
         }}
-        
+
         .suggestion .code {{
             background: #d4e5f7;
             padding: 10px 15px;
@@ -237,7 +237,82 @@ HTML_HEADER = """<!DOCTYPE html>
             margin: 10px 0;
             overflow-x: auto;
         }}
-        
+
+        /* 热点函数调用栈样式 */
+        .stack-details {{
+            margin: 15px 0;
+        }}
+
+        .stack-function {{
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            overflow: hidden;
+        }}
+
+        .stack-header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 15px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+        }}
+
+        .stack-header:hover {{
+            background: linear-gradient(135deg, #5a6fd6 0%, #6a4190 100%);
+        }}
+
+        .stack-name {{
+            font-weight: bold;
+            max-width: 60%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .stack-name code {{
+            background: rgba(255,255,255,0.2);
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 13px;
+        }}
+
+        .stack-pct {{
+            background: rgba(255,255,255,0.3);
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-weight: bold;
+            font-size: 13px;
+        }}
+
+        .stack-toggle {{
+            font-size: 12px;
+            margin-left: 10px;
+        }}
+
+        .stack-content {{
+            background: #f8f9fa;
+            border-top: 1px solid #ddd;
+            padding: 15px;
+        }}
+
+        .stack-content pre {{
+            margin: 0;
+            font-family: 'Courier New', Consolas, monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }}
+
+        .stack-content pre .func-entry {{
+            color: #e83e8c;
+            font-weight: bold;
+        }}
+
         /* 网格布局 */
         .grid {{
             display: grid;
@@ -1582,8 +1657,16 @@ class PerformanceReportGenerator:
                 match = re.match(r'\s*(\d+\.?\d*)\s*%\s+(.+)', line)
                 if match:
                     pct = float(match.group(1))
-                    func = match.group(2).strip()
-                    hot_functions.append((func, pct))
+                    func_full = match.group(2).strip()
+                    # perf report格式: "symbol [module] [k] funcname" 或 "swapper [kernel] [k] funcname"
+                    # 只提取最后的函数名
+                    parts = func_full.split()
+                    if parts:
+                        # 尝试从后往前找第一个有效的函数名
+                        func = parts[-1]
+                        # 去掉 [k] 前缀（如果还在的话）
+                        func = func.lstrip('[]')
+                        hot_functions.append((func, pct))
 
         # 分类热点函数
         graphics_funcs = []
@@ -1594,6 +1677,11 @@ class PerformanceReportGenerator:
                 graphics_funcs.append((func, pct))
             else:
                 general_funcs.append((func, pct))
+
+        # 生成热点函数调用栈详情
+        hot_stacks_html = ""
+        if stack_counts and stack_counts != "N/A" and hot_functions:
+            hot_stacks_html = self._generate_hot_function_stacks(stack_counts, hot_functions[:10])
 
         # 系统调用分析
         syscall_html = ""
@@ -1611,10 +1699,10 @@ class PerformanceReportGenerator:
 
         hot_funcs_html = ""
         if hot_functions:
-            hot_funcs_html = "<table><tr><th>函数</th><th>CPU占比</th><th>类别</th></tr>"
-            for func, pct in hot_functions[:15]:
+            hot_funcs_html = "<table><tr><th>排名</th><th>函数</th><th>CPU占比</th><th>类别</th></tr>"
+            for i, (func, pct) in enumerate(hot_functions[:15]):
                 category = "图形" if func in [f[0] for f in graphics_funcs] else "通用"
-                hot_funcs_html += f"<tr><td>{self._escape_html(func[:50])}</td><td>{pct:.2f}%</td><td>{category}</td></tr>"
+                hot_funcs_html += f"<tr><td>{i+1}</td><td><code>{self._escape_html(func)}</code></td><td>{pct:.2f}%</td><td>{category}</td></tr>"
             hot_funcs_html += "</table>"
 
         return f"""
@@ -1639,6 +1727,8 @@ class PerformanceReportGenerator:
             <h3>热点函数列表</h3>
             {hot_funcs_html if hot_funcs_html else '<p>无热点数据</p>'}
 
+            {hot_stacks_html}
+
             <h3>perf采样报告</h3>
             <pre>{self._escape_html(perf_report[:3000]) if perf_report != 'N/A' else 'perf数据不可用'}</pre>
 
@@ -1654,6 +1744,139 @@ class PerformanceReportGenerator:
             </div>
         </section>
         """
+
+    def _generate_hot_function_stacks(self, stack_data: str, hot_functions: List[Tuple[str, float]]) -> str:
+        """为热点函数生成调用栈详情"""
+        html = "<h3>热点函数调用栈详情</h3>"
+        html += "<div class='stack-details'>"
+
+        for func, pct in hot_functions:
+            if pct < 0.5:  # 只显示占比>0.5%的函数
+                continue
+
+            # 提取该函数相关的调用栈
+            func_stacks = self._extract_call_stacks(stack_data, func)
+
+            if func_stacks:
+                # 清理函数名用于HTML id
+                func_id = re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
+                html += f"""
+                <div class="stack-function">
+                    <div class="stack-header" onclick="toggleStack('{func_id}')">
+                        <span class="stack-name"><code>{self._escape_html(func)}</code></span>
+                        <span class="stack-pct">{pct:.2f}%</span>
+                        <span class="stack-toggle">▼</span>
+                    </div>
+                    <div class="stack-content" id="{func_id}">
+                        <pre>{func_stacks}</pre>
+                    </div>
+                </div>
+                """
+            else:
+                # 即使没有调用栈也显示函数名
+                func_id = re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
+                html += f"""
+                <div class="stack-function">
+                    <div class="stack-header" onclick="toggleStack('{func_id}')">
+                        <span class="stack-name"><code>{self._escape_html(func)}</code></span>
+                        <span class="stack-pct">{pct:.2f}%</span>
+                        <span class="stack-toggle">▼</span>
+                    </div>
+                    <div class="stack-content" id="{func_id}">
+                        <pre>(无详细调用栈数据)</pre>
+                    </div>
+                </div>
+                """
+
+        html += "</div>"
+
+        # 添加折叠/展开的JavaScript
+        if "<script>" not in html:
+            html += """
+            <script>
+            function toggleStack(id) {
+                var content = document.getElementById(id);
+                if (content.style.display === 'none') {
+                    content.style.display = 'block';
+                } else {
+                    content.style.display = 'none';
+                }
+            }
+            document.querySelectorAll('.stack-content').forEach(function(el) {
+                el.style.display = 'none';
+            });
+            </script>
+            """
+
+        return html
+
+    def _extract_call_stacks(self, stack_data: str, func_name: str) -> str:
+        """从栈数据中提取特定函数的调用栈（只提取函数名，反向显示）"""
+        lines = stack_data.split('\n')
+        stack_frames = []
+        current_event_lines = []
+        found_target = False
+        completed = False
+
+        for line in lines:
+            stripped = line.strip()
+            
+            # perf script/record 输出格式: "PID CPU [ID] TIME: EVENT" 或 "swapper 0 [000] TIME: EVENT"
+            if re.match(r'^\S+\s+\d+\s+\[\d+\]\s+\d+\.\d+:', stripped):
+                # 处理前一个事件
+                if found_target and current_event_lines:
+                    stack_frames.extend(current_event_lines)
+                    completed = True
+                    break
+                if completed:
+                    break
+                # 开始新事件
+                current_event_lines = []
+                found_target = False
+                continue
+
+            # 检查是否包含目标函数
+            if func_name in stripped:
+                found_target = True
+
+            # 收集栈帧（以 \t 开头或足够缩进的行）
+            if '\t' in line or line.startswith('    '):
+                frame_text = stripped.lstrip('\t ')
+                parts = frame_text.split()
+                if len(parts) >= 2:
+                    symbol_part = parts[1]
+                    func = symbol_part.split('+')[0].split('(')[0]
+                    if func and len(func) > 2 and not func.startswith('0x'):
+                        current_event_lines.append(func)
+
+        # 处理最后一个事件
+        if found_target and current_event_lines and not completed:
+            stack_frames.extend(current_event_lines)
+
+        if not stack_frames:
+            return ""
+
+        # 反转顺序（自底向上变为自顶向下），并去重
+        stack_frames.reverse()
+        deduped = []
+        prev = None
+        for f in stack_frames[:20]:
+            if f != prev:
+                deduped.append(f)
+                prev = f
+
+        # 添加层级调用关系
+        result = []
+        for i, func in enumerate(deduped):
+            if i == 0:
+                # 入口函数直接显示函数名
+                result.append(f'<span class="func-entry">{func}</span>')
+            else:
+                # 生成层级缩进: │   │   └─
+                indent = ''.join(['│   ' for _ in range(i - 1)])
+                result.append(f'{indent}└─ {func}')
+
+        return '\n'.join(result)
 
     def _generate_graphics_optimization_section(self) -> str:
         """生成图形渲染优化章节"""
