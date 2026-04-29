@@ -386,13 +386,19 @@ class PerformanceReportGenerator:
     def analyze_data(self):
         """分析数据并识别问题"""
         print("分析性能数据...")
-        
+
         self._check_memory()
         self._check_gpu()
         self._check_cpu()
         self._check_wayland()
         self._check_app_process()
-        
+
+        # 新增：火焰图数据分析
+        self._check_flamegraph_data()
+
+        # 新增：图形学特定分析
+        self._check_graphics_optimization()
+
         print(f"发现 {len(self.issues)} 个问题, {len(self.suggestions)} 条建议")
     
     def _extract_value(self, text: str, pattern: str) -> Optional[str]:
@@ -409,6 +415,315 @@ class PerformanceReportGenerator:
             except:
                 return None
         return None
+
+    #============================================================================
+    # 火焰图数据分析
+    #============================================================================
+    def _check_flamegraph_data(self):
+        """分析火焰图数据，识别CPU热点函数"""
+        print("  分析火焰图数据...")
+
+        perf_report = self.data.get("files", {}).get("perf_report.txt", "")
+        stack_counts = self.data.get("files", {}).get("stack_counts.txt", "")
+        function_counts = self.data.get("files", {}).get("function_counts.txt", "")
+        syscall_counts = self.data.get("files", {}).get("syscall_counts.txt", "")
+
+        # 分析perf报告
+        if perf_report and perf_report != "N/A" and "采集失败" not in perf_report:
+            hot_functions = self._extract_hot_functions(perf_report)
+            if hot_functions:
+                self._analyze_hot_functions(hot_functions)
+
+        # 分析函数调用频率
+        if function_counts and function_counts != "N/A":
+            self._analyze_graphics_functions(function_counts)
+
+        # 分析系统调用
+        if syscall_counts and syscall_counts != "N/A" and "N/A" not in syscall_counts:
+            self._analyze_syscalls(syscall_counts)
+
+    def _extract_hot_functions(self, perf_text: str) -> List[Tuple[str, float]]:
+        """从perf报告中提取热点函数"""
+        hot_funcs = []
+        lines = perf_text.split('\n')
+        for line in lines:
+            # 匹配 perf report 格式: "  xx.xx%  func_name"
+            match = re.match(r'\s*(\d+\.?\d*)\s*%\s+(.+)', line)
+            if match:
+                pct = float(match.group(1))
+                func_name = match.group(2).strip()
+                hot_funcs.append((func_name, pct))
+        return hot_funcs[:20]  # 返回前20个热点
+
+    def _analyze_hot_functions(self, hot_funcs: List[Tuple[str, float]]):
+        """分析热点函数，生成优化建议"""
+        if not hot_funcs:
+            return
+
+        # 按类别分析热点函数
+        graphics_hot = []
+        general_hot = []
+
+        for func, pct in hot_funcs:
+            func_lower = func.lower()
+            # 图形学相关函数
+            if any(kw in func_lower for kw in ['gl', 'egl', 'drm', 'gpu', 'shader', 'texture', 'render', 'blit', 'flip', 'sync', ' Mesa']):
+                graphics_hot.append((func, pct))
+            else:
+                general_hot.append((func, pct))
+
+        # 报告热点函数
+        if graphics_hot:
+            top_graphics = graphics_hot[:3]
+            self.suggestions.append({
+                "title": "GPU/图形渲染热点检测",
+                "category": "graphics",
+                "content": f"检测到以下图形渲染函数占用较高CPU时间: {', '.join([f'{f[0]} ({f[1]:.1f}%)' for f in top_graphics])}",
+                "action": self._get_graphics_hot_suggestion(top_graphics)
+            })
+
+        if general_hot:
+            top_general = general_hot[:5]
+            self.issues.append({
+                "severity": "warning",
+                "title": "通用热点函数",
+                "detail": f"检测到高CPU占用的非图形函数: {', '.join([f[0] for f in top_general])}"
+            })
+            self.suggestions.append({
+                "title": "CPU热点优化",
+                "category": "general",
+                "content": f"热点函数: {', '.join([f'{f[0]} ({f[1]:.1f}%)' for f in top_general])}",
+                "action": "检查这些函数是否有优化空间，考虑算法优化、缓存、并行化等方式。"
+            })
+
+    def _get_graphics_hot_suggestion(self, hot_funcs: List[Tuple[str, float]]) -> str:
+        """根据热点图形函数生成具体建议"""
+        suggestions = []
+        for func, pct in hot_funcs:
+            func_lower = func.lower()
+            if 'shader' in func_lower:
+                suggestions.append(f"着色器 {func} 占用{pct:.1f}%，考虑简化着色器逻辑或使用更低精度的数据类型。")
+            elif 'texture' in func_lower or 'tex' in func_lower:
+                suggestions.append(f"纹理操作 {func} 占用{pct:.1f}%，考虑使用GPU压缩纹理格式（ETC/ASTC/BC）。")
+            elif 'blit' in func_lower or 'copy' in func_lower:
+                suggestions.append(f"数据传输 {func} 占用{pct:.1f}%，考虑使用PBO或DMA传输优化。")
+            elif 'sync' in func_lower or 'wait' in func_lower:
+                suggestions.append(f"同步操作 {func} 占用{pct:.1f}%，考虑使用Fence或Timeline同步机制。")
+            elif 'drm' in func_lower or 'modeset' in func_lower:
+                suggestions.append(f"DRM调用 {func} 占用{pct:.1f}%，检查显示模式设置是否有缓存空间。")
+            elif 'egl' in func_lower or 'gl' in func_lower:
+                suggestions.append(f"OpenGL/EGL调用 {func} 占用{pct:.1f}%，检查是否有冗余的状态切换。")
+
+        if not suggestions:
+            return "分析热点函数，建议使用GPU Profiler进行深入分析。"
+        return " ".join(suggestions[:3])
+
+    def _analyze_graphics_functions(self, func_text: str):
+        """分析BCC/funccount采集的图形函数调用频率"""
+        lines = func_text.split('\n')
+        high_freq_funcs = []
+
+        for line in lines:
+            # 匹配格式: "FUNCTION                              COUNT"
+            match = re.match(r'([gl|egl|drm][\w]+)\s+(\d+)', line, re.IGNORECASE)
+            if match:
+                func = match.group(1)
+                count = int(match.group(2))
+                if count > 10000:  # 高频调用阈值
+                    high_freq_funcs.append((func, count))
+
+        if high_freq_funcs:
+            self.suggestions.append({
+                "title": "高频图形API调用检测",
+                "category": "api_calls",
+                "content": f"检测到 {len(high_freq_funcs)} 个高频调用的图形函数，可能存在冗余调用。",
+                "action": f"高频函数: {', '.join([f[0] for f in high_freq_funcs[:5]])}。建议检查调用链，合并相同状态的绘制调用。"
+            })
+
+    def _analyze_syscalls(self, syscall_text: str):
+        """分析系统调用，识别阻塞和频繁调用"""
+        lines = syscall_text.split('\n')
+        blocking_calls = ['ioctl', 'read', 'write', 'poll', 'select', 'epoll']
+        high_count = []
+
+        for line in lines:
+            if any(call in line.lower() for call in blocking_calls):
+                # 提取调用次数
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        count = int(parts[-1])
+                        syscall = parts[0] if len(parts) > 1 else ""
+                        if count > 1000:
+                            high_count.append((syscall, count))
+                    except:
+                        pass
+
+        if high_count:
+            self.suggestions.append({
+                "title": "系统调用优化建议",
+                "category": "syscall",
+                "content": f"检测到频繁的系统调用: {', '.join([f'{s[0]}({s[1]})' for s in high_count[:3]])}",
+                "action": "考虑使用批处理、缓存或异步IO减少系统调用次数。"
+            })
+
+    #============================================================================
+    # 图形学特定优化分析
+    #============================================================================
+    def _check_graphics_optimization(self):
+        """分析OpenGL/DRM相关信息，生成图形学特定的优化建议"""
+        print("  分析图形优化机会...")
+
+        # 分析OpenGL信息
+        opengl_info = self.data.get("files", {}).get("opengl_info.txt", "")
+        if opengl_info and opengl_info != "N/A":
+            self._analyze_opengl_caps(opengl_info)
+
+        # 分析DRM状态
+        drm_clients = self.data.get("files", {}).get("drm_clients.txt", "")
+        gpu_allocs = self.data.get("files", {}).get("gpu_memory_allocs.txt", "")
+        if gpu_allocs and gpu_allocs != "N/A":
+            self._analyze_gpu_memory(gpu_allocs)
+
+        # 分析帧率相关
+        app_cpu = self.data.get("files", {}).get("app_cpu.txt", "")
+        if app_cpu:
+            self._analyze_frame_timing(app_cpu)
+
+        # Vulkan分析
+        vulkan_info = self.data.get("files", {}).get("vulkan_info.txt", "")
+        if vulkan_info and vulkan_info != "N/A":
+            self._analyze_vulkan_info(vulkan_info)
+
+    def _analyze_opengl_caps(self, gl_info: str):
+        """分析OpenGL能力，检查优化点"""
+        issues = []
+
+        # 检查GL版本
+        gl_version = re.search(r'OpenGL version string:\s*(.+)', gl_info)
+        if gl_version:
+            version_str = gl_version.group(1).strip()
+            # 提取主版本号
+            version_match = re.search(r'(\d+)\.(\d+)', version_str)
+            if version_match:
+                major, minor = int(version_match.group(1)), int(version_match.group(2))
+                if major < 3:
+                    issues.append("OpenGL版本较低（<3.0），无法使用现代渲染优化技术。建议升级到OpenGL ES 3.0或更高版本。")
+                elif major == 3 and minor < 2:
+                    issues.append("OpenGL 3.x版本，建议考虑使用Compute Shader等更现代的特性。")
+
+        # 检查纹理压缩支持
+        compressions = []
+        if 'GL_OES_compressed_ETC1_RGB8_texture' in gl_info or 'GL_ETC1_RGB8_OES' in gl_info:
+            compressions.append('ETC1')
+        if 'GL_OES_texture_compression_astc' in gl_info or 'GL_ASTC' in gl_info:
+            compressions.append('ASTC')
+        if 'GL_S3TC' in gl_info or 'GL_EXT_texture_compression_s3tc' in gl_info:
+            compressions.append('DXT/BC')
+
+        if compressions:
+            self.suggestions.append({
+                "title": "纹理压缩格式建议",
+                "category": "texture",
+                "content": f"GPU支持的纹理压缩格式: {', '.join(compressions)}",
+                "action": f"使用 {compressions[0]} 格式可显著减少纹理内存占用和带宽使用。"
+            })
+        else:
+            issues.append("未检测到GPU压缩纹理支持，建议评估纹理数据格式优化。")
+
+        # 检查V-Sync设置
+        if 'v-sync' in gl_info.lower() or 'vsync' in gl_info.lower():
+            self.suggestions.append({
+                "title": "垂直同步设置检查",
+                "category": "vsync",
+                "content": "检测到V-Sync配置",
+                "action": "对于固定帧率应用，可考虑使用Triple Buffering优化显示延迟。"
+            })
+
+        if issues:
+            for issue in issues[:2]:  # 限制数量
+                self.issues.append({
+                    "severity": "info",
+                    "title": "OpenGL配置建议",
+                    "detail": issue
+                })
+
+    def _analyze_gpu_memory(self, mem_info: str):
+        """分析GPU内存使用"""
+        # 提取内存使用信息
+        allocations = re.findall(r'(\w+):\s*(\d+)', mem_info)
+
+        if allocations:
+            total_alloc = sum(int(a[1]) for a in allocations if a[1].isdigit())
+            if total_alloc > 100 * 1024 * 1024:  # > 100MB
+                self.issues.append({
+                    "severity": "warning",
+                    "title": "GPU内存占用较高",
+                    "detail": f"检测到GPU内存分配约 {total_alloc / 1024 / 1024:.0f}MB"
+                })
+                self.suggestions.append({
+                    "title": "GPU内存优化",
+                    "category": "gpu_memory",
+                    "content": "GPU内存使用量较高，可能影响渲染性能。",
+                    "action": "建议：1) 使用GPU压缩纹理（ETC/ASTC）2) 实现纹理流式加载 3) 减少高分辨率帧缓冲 4) 及时释放不需要的GPU资源。"
+                })
+
+    def _analyze_frame_timing(self, cpu_info: str):
+        """分析帧渲染时机相关指标"""
+        # 从CPU使用率推断帧率稳定性
+        cpu_values = re.findall(r"^\s*\d+\s+[\d.]+\s+(\d+\.?\d*)", cpu_info, re.MULTILINE)
+        if cpu_values:
+            try:
+                values = [float(v) for v in cpu_values if float(v) > 0]
+                if values:
+                    avg_cpu = sum(values) / len(values)
+                    max_cpu = max(values)
+                    std_dev = (sum((v - avg_cpu) ** 2 for v in values) / len(values)) ** 0.5
+
+                    # CPU使用率很高且波动大
+                    if max_cpu > 90:
+                        self.issues.append({
+                            "severity": "warning",
+                            "title": "帧渲染CPU负载过高",
+                            "detail": f"峰值CPU使用率 {max_cpu:.1f}%，可能导致帧率不稳定"
+                        })
+                        self.suggestions.append({
+                            "title": "帧率稳定性优化",
+                            "category": "frame_rate",
+                            "content": "CPU使用率波动较大，可能导致帧时间不稳定。",
+                            "action": "建议：1) 使用帧时间预算管理 2) 实现异步渲染管线 3) 将CPU密集操作移至GPU 4) 使用多线程渲染分离逻辑和渲染。"
+                        })
+
+                    # 波动检测
+                    if std_dev > avg_cpu * 0.3 and avg_cpu > 50:
+                        self.suggestions.append({
+                            "title": "渲染负载均衡",
+                            "category": "load_balance",
+                            "content": "检测到渲染负载不均匀，可能导致周期性卡顿。",
+                            "action": "建议实现脏矩形更新、视锥剔除、LOD等技术减少每帧渲染负载差异。"
+                        })
+            except:
+                pass
+
+    def _analyze_vulkan_info(self, vulkan_info: str):
+        """分析Vulkan信息"""
+        # 检查Vulkan特性
+        if 'VK_KHR_timeline_semaphore' in vulkan_info or 'timeline semaphore' in vulkan_info.lower():
+            self.suggestions.append({
+                "title": "Vulkan Timeline Semaphore",
+                "category": "vulkan",
+                "content": "GPU支持Timeline Semaphore同步机制",
+                "action": "使用Timeline Semaphore替代传统Fence可减少同步开销，提高多线程渲染效率。"
+            })
+
+        # 检查WSI扩展
+        if 'VK_KHR_display' in vulkan_info:
+            self.suggestions.append({
+                "title": "Vulkan显示扩展支持",
+                "category": "vulkan_display",
+                "content": "GPU支持原生显示扩展",
+                "action": "可考虑使用VK_KHR_display直接控制显示输出，减少 compositor 开销。"
+            })
     
     def _check_memory(self):
         """检查内存状态"""
@@ -605,7 +920,13 @@ class PerformanceReportGenerator:
         
         # 问题诊断
         html += self._generate_issues_section()
-        
+
+        # 火焰图分析
+        html += self._generate_flamegraph_section()
+
+        # 图形渲染优化
+        html += self._generate_graphics_optimization_section()
+
         # 优化建议
         html += self._generate_suggestions_section()
         
@@ -644,6 +965,8 @@ class PerformanceReportGenerator:
                 <li><a href="#compositor">Compositor状态</a></li>
                 <li><a href="#application">应用性能</a></li>
                 <li><a href="#issues">问题诊断</a></li>
+                <li><a href="#flamegraph">热点分析</a></li>
+                <li><a href="#graphics">图形优化</a></li>
                 <li><a href="#suggestions">优化建议</a></li>
             </ul>
         </nav>
@@ -933,7 +1256,188 @@ class PerformanceReportGenerator:
             {issues_html}
         </section>
         """
-    
+
+    def _generate_flamegraph_section(self) -> str:
+        """生成火焰图分析章节"""
+        perf_report = self.data.get("files", {}).get("perf_report.txt", "N/A")
+        stack_counts = self.data.get("files", {}).get("stack_counts.txt", "N/A")
+        syscall_counts = self.data.get("files", {}).get("syscall_counts.txt", "N/A")
+        function_counts = self.data.get("files", {}).get("function_counts.txt", "N/A")
+
+        # 解析热点函数
+        hot_functions = []
+        if perf_report and perf_report != "N/A" and "采集失败" not in perf_report:
+            for line in perf_report.split('\n')[:30]:
+                match = re.match(r'\s*(\d+\.?\d*)\s*%\s+(.+)', line)
+                if match:
+                    pct = float(match.group(1))
+                    func = match.group(2).strip()
+                    hot_functions.append((func, pct))
+
+        # 分类热点函数
+        graphics_funcs = []
+        general_funcs = []
+        for func, pct in hot_functions:
+            func_lower = func.lower()
+            if any(kw in func_lower for kw in ['gl', 'egl', 'drm', 'gpu', 'shader', 'texture', 'render', ' Mesa', 'intel', 'i915']):
+                graphics_funcs.append((func, pct))
+            else:
+                general_funcs.append((func, pct))
+
+        # 系统调用分析
+        syscall_html = ""
+        if syscall_counts and syscall_counts != "N/A" and "N/A" not in syscall_counts:
+            syscall_lines = [l for l in syscall_counts.split('\n') if l.strip()][:10]
+            if syscall_lines:
+                syscall_html = "<h3>系统调用统计</h3><pre>" + "\n".join(self._escape_html(l) for l in syscall_lines) + "</pre>"
+
+        # 函数计数
+        func_count_html = ""
+        if function_counts and function_counts != "N/A" and "N/A" not in function_counts:
+            func_lines = [l for l in function_counts.split('\n') if l.strip() and not l.startswith('#')][:15]
+            if func_lines:
+                func_count_html = "<h3>图形函数调用频率</h3><pre>" + "\n".join(self._escape_html(l) for l in func_lines) + "</pre>"
+
+        hot_funcs_html = ""
+        if hot_functions:
+            hot_funcs_html = "<table><tr><th>函数</th><th>CPU占比</th><th>类别</th></tr>"
+            for func, pct in hot_functions[:15]:
+                category = "图形" if func in [f[0] for f in graphics_funcs] else "通用"
+                hot_funcs_html += f"<tr><td>{self._escape_html(func[:50])}</td><td>{pct:.2f}%</td><td>{category}</td></tr>"
+            hot_funcs_html += "</table>"
+
+        return f"""
+        <section id="flamegraph" class="card">
+            <h2>6. 性能热点分析（火焰图数据）</h2>
+
+            <div class="grid">
+                <div class="stat-box">
+                    <div class="value">{len(hot_functions)}</div>
+                    <div class="label">检测到的热点函数</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{len(graphics_funcs)}</div>
+                    <div class="label">图形相关热点</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{f"{hot_functions[0][1]:.1f}" if hot_functions else "0.0"}%</div>
+                    <div class="label">最高热点占比</div>
+                </div>
+            </div>
+
+            <h3>热点函数列表</h3>
+            {hot_funcs_html if hot_funcs_html else '<p>无热点数据</p>'}
+
+            <h3>perf采样报告</h3>
+            <pre>{self._escape_html(perf_report[:3000]) if perf_report != 'N/A' else 'perf数据不可用'}</pre>
+
+            {syscall_html}
+            {func_count_html}
+
+            <div class="suggestion">
+                <h4>热点分析方法</h4>
+                <p>1. 查看上方热点函数列表，优先关注占比>5%的函数</p>
+                <p>2. 图形相关热点（gl*/egl*/drm*）建议检查着色器复杂度、纹理格式、绘制调用次数</p>
+                <p>3. 通用热点需评估是否有算法优化空间或缓存可能</p>
+                <p>4. 如需更详细的火焰图，可将 stack_counts.txt 导入 FlameGraph 工具生成 SVG</p>
+            </div>
+        </section>
+        """
+
+    def _generate_graphics_optimization_section(self) -> str:
+        """生成图形渲染优化章节"""
+        opengl_info = self.data.get("files", {}).get("opengl_info.txt", "N/A")
+        vulkan_info = self.data.get("files", {}).get("vulkan_info.txt", "N/A")
+        gpu_allocs = self.data.get("files", {}).get("gpu_memory_allocs.txt", "N/A")
+        drm_traces = self.data.get("files", {}).get("drm_traces.txt", "N/A")
+
+        # 解析OpenGL版本
+        gl_version = "未知"
+        gl_renderer = "未知"
+        if opengl_info and opengl_info != "N/A":
+            v_match = re.search(r'OpenGL version string:\s*(.+)', opengl_info)
+            r_match = re.search(r'OpenGL renderer:\s*(.+)', opengl_info)
+            if v_match:
+                gl_version = v_match.group(1).strip()[:40]
+            if r_match:
+                gl_renderer = r_match.group(1).strip()[:40]
+
+        # 纹理压缩支持
+        texture_formats = []
+        if opengl_info:
+            if 'ETC1' in opengl_info or 'ETC' in opengl_info:
+                texture_formats.append('ETC')
+            if 'ASTC' in opengl_info:
+                texture_formats.append('ASTC')
+            if 'S3TC' in opengl_info or 'DXT' in opengl_info or 'BC' in opengl_info:
+                texture_formats.append('BC/DXT')
+            if 'RGTC' in opengl_info or 'LATC' in opengl_info:
+                texture_formats.append('RGTC')
+
+        formats_str = ', '.join(texture_formats) if texture_formats else '未检测到压缩格式'
+
+        return f"""
+        <section id="graphics" class="card">
+            <h2>7. 图形渲染分析</h2>
+
+            <h3>GPU信息</h3>
+            <table>
+                <tr><th>项目</th><th>值</th></tr>
+                <tr><td>OpenGL版本</td><td>{gl_version}</td></tr>
+                <tr><td>GPU渲染器</td><td>{gl_renderer}</td></tr>
+                <tr><td>支持的纹理压缩</td><td>{formats_str}</td></tr>
+            </table>
+
+            <h3>GPU内存状态</h3>
+            <pre>{self._escape_html(gpu_allocs[:2000]) if gpu_allocs and gpu_allocs != 'N/A' else '不可用'}</pre>
+
+            {self._generate_graphics_optimization_suggestions(texture_formats, gl_version)}
+
+            <div class="issue success">
+                <h4>图形优化检查清单</h4>
+                <ul style="margin: 10px 0 10px 20px;">
+                    <li>□ 使用GPU压缩纹理减少内存带宽占用</li>
+                    <li>□ 合并绘制调用，使用实例化渲染</li>
+                    <li>□ 实现帧率限制，避免无意义的过高帧率</li>
+                    <li>□ 检查是否有冗余的状态切换</li>
+                    <li>□ 考虑使用脏矩形更新替代全屏重绘</li>
+                    <li>□ 优化着色器，避免在顶点着色器中进行复杂计算</li>
+                    <li>□ 使用Uniform Buffer替代大量uniform变量</li>
+                    <li>□ 实施纹理流式加载，延迟加载远处资源</li>
+                </ul>
+            </div>
+        </section>
+        """
+
+    def _generate_graphics_optimization_suggestions(self, texture_formats: list, gl_version: str) -> str:
+        """生成针对当前GPU配置的图形优化建议"""
+        suggestions = []
+
+        # 纹理格式建议
+        if 'ASTC' in texture_formats:
+            suggestions.append("推荐使用ASTC纹理格式，提供高质量压缩比（可达0.5bpp），特别适合移动GPU。")
+        elif 'ETC' in texture_formats:
+            suggestions.append("推荐使用ETC2纹理格式（向后兼容ETC1），广泛支持且压缩效果好。")
+        elif 'BC' in texture_formats or 'DXT' in texture_formats:
+            suggestions.append("推荐使用BC/DXT纹理格式，适合桌面GPU，可显著减少显存占用。")
+        else:
+            suggestions.append("建议评估是否可使用GPU压缩纹理格式，当前GPU支持的压缩格式有限。")
+
+        # OpenGL版本建议
+        if 'ES 2' in gl_version or 'OpenGL ES 2' in gl_version:
+            suggestions.append("OpenGL ES 2.0环境限制较多，建议避免使用MRT（多渲染目标）等高级特性。")
+        elif 'ES 3' in gl_version or 'OpenGL ES 3' in gl_version:
+            suggestions.append("OpenGL ES 3.0支持实例化渲染和MSAA，可优化大量相似物体的渲染效率。")
+        elif '4.' in gl_version or '5.' in gl_version:
+            suggestions.append("现代OpenGL环境，可使用Compute Shader进行通用计算，将部分CPU负载转移至GPU。")
+
+        if suggestions:
+            html = "<h3>图形优化建议</h3>"
+            for i, s in enumerate(suggestions, 1):
+                html += f'<div class="suggestion"><h4>{i}. 优化建议</h4><p>{s}</p></div>'
+            return html
+        return ""
+
     def _generate_suggestions_section(self) -> str:
         """生成优化建议部分"""
         if not self.suggestions:
@@ -960,9 +1464,9 @@ class PerformanceReportGenerator:
         
         return f"""
         <section id="suggestions" class="card">
-            <h2>6. 优化建议</h2>
+            <h2>8. 优化建议</h2>
             {suggestions_html}
-            
+
             <h3>通用优化策略</h3>
             <div class="suggestion">
                 <h4>GPU渲染优化</h4>
