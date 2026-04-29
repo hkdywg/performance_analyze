@@ -354,38 +354,6 @@ collect_memory_info() {
 }
 
 #-------------------------------------------------------------------------------
-# 采集GPU信息（通用方式）
-#-------------------------------------------------------------------------------
-collect_gpu_info() {
-    log_info "采集GPU信息..."
-    
-    # DRM设备列表
-    ssh_cmd 'ls -la /sys/class/drm/' > "${OUTPUT_DIR}/drm_devices.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/drm_devices.txt"
-    
-    # GPU基本信息（Vendor/Device ID - 通用方式）
-    for card in /sys/class/drm/card*/device; do
-        ssh_cmd "cat ${card}/vendor 2>/dev/null; cat ${card}/device 2>/dev/null" > "${OUTPUT_DIR}/gpu_basic.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/gpu_basic.txt"
-    done
-    
-    # GPU内存信息
-    ssh_cmd 'cat /sys/class/drm/card*/device/mem_info_vram 2>/dev/null || echo "N/A"' > "${OUTPUT_DIR}/gpu_vram.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/gpu_vram.txt"
-    ssh_cmd 'cat /sys/class/drm/card*/device/mem_info_gtt 2>/dev/null || echo "N/A"' > "${OUTPUT_DIR}/gpu_gtt.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/gpu_gtt.txt"
-    
-    # GPU利用率（如果支持）
-    ssh_cmd 'cat /sys/class/drm/card*/device/gpu_busy_percent 2>/dev/null || echo "N/A"' > "${OUTPUT_DIR}/gpu_utilization.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/gpu_utilization.txt"
-    
-    # DRM状态（用于诊断）
-    ssh_cmd 'cat /sys/kernel/debug/dri/0/state 2>/dev/null || cat /sys/kernel/debug/dri/0/mm 2>/dev/null || echo "N/A"' > "${OUTPUT_DIR}/drm_state.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/drm_state.txt"
-    
-    # DRM设备状态
-    ssh_cmd 'cat /sys/class/drm/card*/status 2>/dev/null || echo "N/A"' > "${OUTPUT_DIR}/drm_status.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/drm_status.txt"
-    
-    log_success "GPU信息采集完成"
-}
-
-#-------------------------------------------------------------------------------
-# 采集Wayland/Weston信息
-#-------------------------------------------------------------------------------
 collect_wayland_info() {
     log_info "采集Wayland/Weston信息..."
     
@@ -471,13 +439,33 @@ collect_app_info() {
 
 #-------------------------------------------------------------------------------
 # 周期性采样 CPU 和内存数据（用于折线图）
+# 优化：每次采样只执行一条 SSH 命令，提高效率和可靠性
 #-------------------------------------------------------------------------------
 collect_performance_samples() {
     log_info "开始周期性采样 CPU 和内存数据..."
     log_info "采样参数: 持续时间=${DURATION}s, 间隔=${INTERVAL}s"
     
+    # 从 app_pid.txt 读取 PID
+    local app_pid_file="${OUTPUT_DIR}/app_pid.txt"
+    local APP_PID=""
+    
+    if [ -f "$app_pid_file" ]; then
+        APP_PID=$(cat "$app_pid_file" | tr -cd '[:digit:]' | tr -d '\r\n')
+    fi
+    
     if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ] || [ "$APP_PID" = "" ]; then
         log_warning "未找到目标进程PID，跳过采样"
+        echo "时间(s),CPU%,RSS(MB),VSZ(MB)" > "${OUTPUT_DIR}/perf_samples.csv"
+        echo "N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+        return
+    fi
+    
+    log_info "目标进程PID: ${APP_PID}"
+    
+    # 验证进程是否存在
+    local proc_exists=$(ssh_cmd "test -d /proc/${APP_PID} && echo 'OK'" 2>&1 | tr -d '\r\n ')
+    if [ "$proc_exists" != "OK" ]; then
+        log_warning "进程 ${APP_PID} 不存在"
         echo "时间(s),CPU%,RSS(MB),VSZ(MB)" > "${OUTPUT_DIR}/perf_samples.csv"
         echo "N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
         return
@@ -497,23 +485,26 @@ collect_performance_samples() {
         iteration=$((iteration + 1))
         local current_time=$((iteration * INTERVAL))
         
-        # 获取进程 CPU 和内存 - 使用ps获取更可靠的格式
-        # 格式: PID COMMAND %CPU %MEM RSS VSZ
-        local app_data=$(ssh_cmd "ps -p ${APP_PID} -o pid,comm,%cpu,%mem,rss,vsz --no-headers 2>/dev/null" | tr -s ' ')
-        if [ -n "$app_data" ]; then
-            # 解析 ps 输出: PID COMMAND %CPU %MEM RSS VSZ
-            local app_cpu=$(echo "$app_data" | awk '{print $3}')
-            local app_rss=$(echo "$app_data" | awk '{print $5}')  # RSS in KB
-            local app_vsz=$(echo "$app_data" | awk '{print $6}')  # VSZ in KB
+        # 使用 top 获取 CPU% 和内存信息 (与 collect_app_info 一致)
+        local top_line=$(ssh_cmd "top -b -n 1 | grep -E '^[[:space:]]*${APP_PID}'" 2>&1)
+        local mem_info=$(ssh_cmd "cat /proc/${APP_PID}/status | grep -E 'VmRSS:|VmSize:'" 2>&1)
+        
+        # 解析 top 输出: PID USER PR NI %CPU %MEM TIME+  COMMAND
+        local cpu_val=$(echo "$top_line" | awk '{print $8}' | tr -d ' \r\n')
+        local rss_kb=$(echo "$mem_info" | grep "VmRSS:" | awk '{print $2}')
+        local vsz_kb=$(echo "$mem_info" | grep "VmSize:" | awk '{print $2}')
+        
+        # 验证数据有效性
+        if [ -n "$rss_kb" ] && [ -n "$vsz_kb" ]; then
+            local rss_mb=$(echo "scale=1; ${rss_kb:-0} / 1024" | bc 2>/dev/null || echo "${rss_kb}" | awk '{printf "%.1f", $1/1024}')
+            local vsz_mb=$(echo "scale=1; ${vsz_kb:-0} / 1024" | bc 2>/dev/null || echo "${vsz_kb}" | awk '{printf "%.1f", $1/1024}')
+            local cpu_pct="${cpu_val:-0}"
             
-            # 转换 RSS 和 VSZ 为 MB
-            local rss_mb=$(echo "$app_rss" | awk '{printf "%.1f", $1/1024}')
-            local vsz_mb=$(echo "$app_vsz" | awk '{printf "%.1f", $1/1024}')
-            
-            echo "${current_time},${app_cpu},${rss_mb},${vsz_mb}" >> "${OUTPUT_DIR}/perf_samples.csv"
-            log_info "采样 ${iteration}/${sample_count}: 时间=${current_time}s, CPU=${app_cpu}%, RSS=${rss_mb}MB"
+            echo "${current_time},${cpu_pct},${rss_mb},${vsz_mb}" >> "${OUTPUT_DIR}/perf_samples.csv"
+            log_info "采样 ${iteration}/${sample_count}: CPU=${cpu_pct}%, RSS=${rss_mb}MB, VSZ=${vsz_mb}MB"
         else
             echo "${current_time},N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+            log_warning "第${iteration}次采样数据无效"
         fi
         
         elapsed=$((elapsed + INTERVAL))
@@ -666,9 +657,6 @@ collect_graphics_traces() {
     # DRM统计信息
     ssh_cmd "cat /sys/kernel/debug/dri/0/clients 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/drm_clients.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/drm_clients.txt"
 
-    # GPU内存分配信息
-    ssh_cmd "cat /sys/kernel/debug/dri/0/mm 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/gpu_memory_allocs.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/gpu_memory_allocs.txt"
-
     # Vulkan信息（如可用）
     local vulkan_available=$(ssh_cmd "which vulkaninfo 2>/dev/null || echo 'not_found'" | tr -d '\r\n')
     if [ "$vulkan_available" != "not_found" ]; then
@@ -805,7 +793,6 @@ main() {
     
     collect_system_info
     collect_memory_info
-    collect_gpu_info
     
     if [ "$DISPLAY_SERVER" = "wayland" ]; then
         collect_wayland_info

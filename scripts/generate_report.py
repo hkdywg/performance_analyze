@@ -425,7 +425,6 @@ class PerformanceReportGenerator:
         print("分析性能数据...")
 
         self._check_memory()
-        self._check_gpu()
         self._check_cpu()
         self._check_wayland()
         self._check_app_process()
@@ -618,9 +617,6 @@ class PerformanceReportGenerator:
 
         # 分析DRM状态
         drm_clients = self.data.get("files", {}).get("drm_clients.txt", "")
-        gpu_allocs = self.data.get("files", {}).get("gpu_memory_allocs.txt", "")
-        if gpu_allocs and gpu_allocs != "N/A":
-            self._analyze_gpu_memory(gpu_allocs)
 
         # 分析帧率相关
         app_cpu = self.data.get("files", {}).get("app_cpu.txt", "")
@@ -683,26 +679,6 @@ class PerformanceReportGenerator:
                     "severity": "info",
                     "title": "OpenGL配置建议",
                     "detail": issue
-                })
-
-    def _analyze_gpu_memory(self, mem_info: str):
-        """分析GPU内存使用"""
-        # 提取内存使用信息
-        allocations = re.findall(r'(\w+):\s*(\d+)', mem_info)
-
-        if allocations:
-            total_alloc = sum(int(a[1]) for a in allocations if a[1].isdigit())
-            if total_alloc > 100 * 1024 * 1024:  # > 100MB
-                self.issues.append({
-                    "severity": "warning",
-                    "title": "GPU内存占用较高",
-                    "detail": f"检测到GPU内存分配约 {total_alloc / 1024 / 1024:.0f}MB"
-                })
-                self.suggestions.append({
-                    "title": "GPU内存优化",
-                    "category": "gpu_memory",
-                    "content": "GPU内存使用量较高，可能影响渲染性能。",
-                    "action": "建议：1) 使用GPU压缩纹理（ETC/ASTC）2) 实现纹理流式加载 3) 减少高分辨率帧缓冲 4) 及时释放不需要的GPU资源。"
                 })
 
     def _analyze_frame_timing(self, cpu_info: str):
@@ -798,40 +774,6 @@ class PerformanceReportGenerator:
                     })
             except:
                 pass
-    
-    def _check_gpu(self):
-        """检查GPU状态"""
-        gpu_util = self.data.get("files", {}).get("gpu_utilization.txt", "")
-        
-        if gpu_util and gpu_util != "N/A":
-            try:
-                # 尝试提取GPU利用率
-                util_match = re.search(r"(\d+)", gpu_util)
-                if util_match:
-                    util = int(util_match.group(1))
-                    
-                    if util > 95:
-                        self.issues.append({
-                            "severity": "warning",
-                            "title": "GPU利用率接近满载",
-                            "detail": f"GPU利用率: {util}%"
-                        })
-                        self.suggestions.append({
-                            "title": "GPU渲染优化",
-                            "content": "GPU负载过高，可能是渲染管线瓶颈。",
-                            "action": "考虑优化着色器、使用GPU压缩纹理、减少绘制调用次数。"
-                        })
-            except:
-                pass
-        
-        # 检查DRM状态
-        drm_state = self.data.get("files", {}).get("drm_state.txt", "")
-        if not drm_state or drm_state == "N/A":
-            self.issues.append({
-                "severity": "warning",
-                "title": "DRM调试信息不可用",
-                "detail": "无法获取详细的GPU状态信息，可能需要root权限。"
-            })
     
     def _check_cpu(self):
         """检查CPU状态"""
@@ -946,9 +888,6 @@ class PerformanceReportGenerator:
         # 系统概览
         html += self._generate_system_overview()
         
-        # GPU状态
-        html += self._generate_gpu_section()
-        
         # Compositor状态
         html += self._generate_compositor_section()
         
@@ -979,70 +918,113 @@ class PerformanceReportGenerator:
         if (typeof perfChartData !== 'undefined' && perfChartData.times.length > 0) {
             const perfCtx = document.getElementById('perfChart');
             if (perfCtx) {
-                new Chart(perfCtx, {
-                    type: 'line',
-                    data: {
-                        labels: perfChartData.times.map(t => t + 's'),
-                        datasets: [
-                            {
-                                label: 'CPU %',
-                                data: perfChartData.appCpu,
-                                borderColor: 'rgb(255, 99, 132)',
-                                backgroundColor: 'rgba(255, 99, 132, 0.1)',
-                                tension: 0.3,
-                                fill: true,
-                                yAxisID: 'y'
-                            },
-                            {
-                                label: 'RSS (MB)',
-                                data: perfChartData.appRss,
-                                borderColor: 'rgb(75, 192, 192)',
-                                backgroundColor: 'rgba(75, 192, 192, 0.1)',
-                                tension: 0.3,
-                                fill: true,
-                                yAxisID: 'y1'
-                            },
-                            {
-                                label: 'VSZ (MB)',
-                                data: perfChartData.appVsz,
-                                borderColor: 'rgb(153, 102, 255)',
-                                backgroundColor: 'rgba(153, 102, 255, 0.1)',
-                                tension: 0.3,
-                                fill: false,
-                                yAxisID: 'y1'
-                            }
-                        ]
-                    },
-                    options: {
-                        responsive: true,
-                        interaction: {
-                            mode: 'index',
-                            intersect: false
-                        },
-                        plugins: {
-                            legend: { position: 'top' },
-                            tooltip: { callbacks: {} }
-                        },
-                        scales: {
-                            y: {
-                                type: 'linear',
-                                display: true,
-                                position: 'left',
-                                beginAtZero: true,
-                                max: 100,
-                                title: { display: true, text: 'CPU %' }
-                            },
-                            y1: {
-                                type: 'linear',
-                                display: false,
-                                position: 'right',
-                                beginAtZero: true,
-                                suggestedMax: maxMemValue,
-                                grid: { drawOnChartArea: false }
-                            }
+                // 检查是否有有效数据（非 null）
+                const hasCpuData = perfChartData.appCpu.some(v => v !== null && v !== undefined);
+                const hasRssData = perfChartData.appRss.some(v => v !== null && v !== undefined);
+                const hasVszData = perfChartData.appVsz.some(v => v !== null && v !== undefined);
+                
+                if (!hasCpuData && !hasRssData && !hasVszData) {
+                    // 所有数据都是 N/A，显示提示信息
+                    perfCtx.parentElement.innerHTML += '<div class="no-data" style="padding:40px;text-align:center;color:#999;">采集数据失败：目标进程采样数据全为 N/A<br>请检查：1) 目标进程是否在运行 2) SSH连接是否正常 3) 采样权限是否足够</div>';
+                    perfCtx.style.display = 'none';
+                } else {
+                    // 过滤掉 null 值，只保留有效数据点
+                    const validIndices = [];
+                    const validTimes = [];
+                    const validCpu = [];
+                    const validRss = [];
+                    const validVsz = [];
+                    
+                    for (let i = 0; i < perfChartData.times.length; i++) {
+                        if (perfChartData.appCpu[i] !== null || 
+                            perfChartData.appRss[i] !== null || 
+                            perfChartData.appVsz[i] !== null) {
+                            validIndices.push(i);
+                            validTimes.push(perfChartData.times[i]);
+                            validCpu.push(perfChartData.appCpu[i]);
+                            validRss.push(perfChartData.appRss[i]);
+                            validVsz.push(perfChartData.appVsz[i]);
                         }
                     }
-                });
+                    
+                    const datasets = [];
+                    
+                    if (hasCpuData) {
+                        datasets.push({
+                            label: 'CPU %',
+                            data: validCpu,
+                            borderColor: 'rgb(255, 99, 132)',
+                            backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                            tension: 0.3,
+                            fill: true,
+                            yAxisID: 'y',
+                            spanGaps: true
+                        });
+                    }
+                    
+                    if (hasRssData) {
+                        datasets.push({
+                            label: 'RSS (MB)',
+                            data: validRss,
+                            borderColor: 'rgb(75, 192, 192)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                            tension: 0.3,
+                            fill: true,
+                            yAxisID: 'y1',
+                            spanGaps: true
+                        });
+                    }
+                    
+                    if (hasVszData) {
+                        datasets.push({
+                            label: 'VSZ (MB)',
+                            data: validVsz,
+                            borderColor: 'rgb(153, 102, 255)',
+                            backgroundColor: 'rgba(153, 102, 255, 0.1)',
+                            tension: 0.3,
+                            fill: false,
+                            yAxisID: 'y1',
+                            spanGaps: true
+                        });
+                    }
+                    
+                    new Chart(perfCtx, {
+                        type: 'line',
+                        data: {
+                            labels: validTimes.map(t => t + 's'),
+                            datasets: datasets
+                        },
+                        options: {
+                            responsive: true,
+                            interaction: {
+                                mode: 'index',
+                                intersect: false
+                            },
+                            plugins: {
+                                legend: { position: 'top' },
+                                tooltip: { callbacks: {} }
+                            },
+                            scales: {
+                                y: {
+                                    type: 'linear',
+                                    display: true,
+                                    position: 'left',
+                                    beginAtZero: true,
+                                    max: 100,
+                                    title: { display: true, text: 'CPU %' }
+                                },
+                                y1: {
+                                    type: 'linear',
+                                    display: true,
+                                    position: 'right',
+                                    beginAtZero: true,
+                                    suggestedMax: maxMemValue > 0 ? maxMemValue : 100,
+                                    grid: { drawOnChartArea: false }
+                                }
+                            }
+                        }
+                    });
+                }
             }
         }
     });
@@ -1080,7 +1062,6 @@ class PerformanceReportGenerator:
         <nav class="nav">
             <ul>
                 <li><a href="#overview">系统概览</a></li>
-                <li><a href="#gpu">GPU状态</a></li>
                 <li><a href="#compositor">Compositor状态</a></li>
                 <li><a href="#application">应用性能</a></li>
                 <li><a href="#issues">问题诊断</a></li>
@@ -1172,86 +1153,6 @@ class PerformanceReportGenerator:
             
             <h3>系统详细信息</h3>
             <pre>{self._escape_html(uname[:500])}</pre>
-        </section>
-        """
-    
-    def _generate_gpu_section(self) -> str:
-        """生成GPU状态部分"""
-        drm_devices = self.data.get("files", {}).get("drm_devices.txt", "N/A")
-        gpu_vram = self.data.get("files", {}).get("gpu_vram.txt", "N/A")
-        gpu_gtt = self.data.get("files", {}).get("gpu_gtt.txt", "N/A")
-        gpu_util = self.data.get("files", {}).get("gpu_utilization.txt", "N/A")
-        drm_status = self.data.get("files", {}).get("drm_status.txt", "N/A")
-        
-        # 处理GPU利用率显示
-        util_value = "N/A"
-        util_class = "normal"
-        if gpu_util and gpu_util != "N/A":
-            try:
-                util_match = re.search(r"(\d+)", gpu_util)
-                if util_match:
-                    util_value = util_match.group(1) + "%"
-                    util_pct = int(util_match.group(1))
-                    if util_pct > 90:
-                        util_class = "high"
-                    elif util_pct > 70:
-                        util_class = "medium"
-            except:
-                pass
-        
-        # 处理VRAM显示
-        vram_display = gpu_vram.strip() if gpu_vram != "N/A" else "不可用"
-        if vram_display != "不可用" and vram_display != "N/A":
-            try:
-                vram_kb = int(re.search(r"(\d+)", vram_display).group(1))
-                vram_display = f"{vram_kb / 1024 / 1024:.0f} MB"
-            except:
-                pass
-        
-        status = "connected" if "connected" in drm_status.lower() else "unknown"
-        status_class = "success" if status == "connected" else "warning"
-        
-        return f"""
-        <section id="gpu" class="card">
-            <h2>2. GPU状态</h2>
-            
-            <div class="grid">
-                <div class="stat-box">
-                    <div class="value">{util_value}</div>
-                    <div class="label">GPU利用率</div>
-                </div>
-                <div class="stat-box">
-                    <div class="value">{vram_display}</div>
-                    <div class="label">VRAM使用</div>
-                </div>
-                <div class="stat-box">
-                    <span class="status {status_class}">{status}</span>
-                    <div class="label">显示器状态</div>
-                </div>
-            </div>
-            
-            <h3>DRM设备列表</h3>
-            <pre>{self._escape_html(drm_devices[:1500])}</pre>
-            
-            <h3>GPU详细信息</h3>
-            <table>
-                <tr>
-                    <th>项目</th>
-                    <th>状态</th>
-                </tr>
-                <tr>
-                    <td>VRAM</td>
-                    <td>{vram_display}</td>
-                </tr>
-                <tr>
-                    <td>GTT</td>
-                    <td>{gpu_gtt.strip() if gpu_gtt != 'N/A' else '不可用'}</td>
-                </tr>
-                <tr>
-                    <td>利用率</td>
-                    <td>{gpu_util.strip() if gpu_util != 'N/A' else '不可用'}</td>
-                </tr>
-            </table>
         </section>
         """
     
@@ -1447,22 +1348,13 @@ class PerformanceReportGenerator:
         perf_samples = self.data.get("files", {}).get("perf_samples.csv", "N/A")
         
         if perf_samples == "N/A" or not perf_samples.strip():
-            return """
-        <section id="perf-chart" class="card">
-            <h2>3. 性能趋势</h2>
-            <div class="no-data">暂无采样数据</div>
-        </section>
-            """
+            # 尝试使用 app_cpu.txt 作为备用数据源
+            return self._generate_chart_from_fallback()
         
         # 解析 CSV 数据
         lines = perf_samples.strip().split('\n')
         if len(lines) < 2:
-            return """
-        <section id="perf-chart" class="card">
-            <h2>3. 性能趋势</h2>
-            <div class="no-data">采样数据不足</div>
-        </section>
-            """
+            return self._generate_chart_from_fallback()
         
         # 解析表头和数据
         header = lines[0].split(',')
@@ -1471,51 +1363,59 @@ class PerformanceReportGenerator:
         app_rss_data = []
         app_vsz_data = []
         
+        # 统计有效数据点
+        valid_data_count = 0
+        
         for line in lines[1:]:
             parts = line.split(',')
             if len(parts) >= 4:
                 time_data.append(parts[0])
-                # 转换字符串为浮点数
-                try:
-                    app_cpu_data.append(float(parts[1]))
-                except:
-                    app_cpu_data.append(0)
-                try:
-                    # RSS 可能是 KB 或带单位的字符串
-                    rss_val = parts[2].strip()
-                    if 'm' in rss_val.lower() or 'k' in rss_val.lower():
+                
+                # 解析 CPU 值
+                cpu_val = parts[1].strip()
+                if cpu_val == "N/A" or cpu_val == "" or cpu_val == "0":
+                    app_cpu_data.append(None)  # 使用 None 表示无效数据
+                else:
+                    try:
+                        app_cpu_data.append(float(cpu_val))
+                        valid_data_count += 1
+                    except:
+                        app_cpu_data.append(None)
+                
+                # 解析 RSS 值
+                rss_val = parts[2].strip()
+                if rss_val == "N/A" or rss_val == "":
+                    app_rss_data.append(None)
+                else:
+                    try:
                         # 处理 "626m" 或 "100K" 格式
-                        rss_val = rss_val.lower().replace('m', '').replace('k', '')
-                        app_rss_data.append(float(rss_val))
-                    else:
-                        app_rss_data.append(float(rss_val))
-                except:
-                    app_rss_data.append(0)
-                try:
-                    vsz_val = parts[3].strip()
-                    if 'm' in vsz_val.lower() or 'k' in vsz_val.lower():
-                        vsz_val = vsz_val.lower().replace('m', '').replace('k', '')
-                        app_vsz_data.append(float(vsz_val))
-                    else:
-                        app_vsz_data.append(float(vsz_val))
-                except:
-                    app_vsz_data.append(0)
+                        rss_clean = rss_val.lower().replace('m', '').replace('k', '')
+                        app_rss_data.append(float(rss_clean))
+                        valid_data_count += 1
+                    except:
+                        app_rss_data.append(None)
+                
+                # 解析 VSZ 值
+                vsz_val = parts[3].strip()
+                if vsz_val == "N/A" or vsz_val == "":
+                    app_vsz_data.append(None)
+                else:
+                    try:
+                        vsz_clean = vsz_val.lower().replace('m', '').replace('k', '')
+                        app_vsz_data.append(float(vsz_clean))
+                        valid_data_count += 1
+                    except:
+                        app_vsz_data.append(None)
         
-        if not time_data:
-            return """
-        <section id="perf-chart" class="card">
-            <h2>3. 性能趋势</h2>
-            <div class="no-data">无法解析采样数据</div>
-        </section>
-            """
+        # 检查是否有有效数据
+        if valid_data_count == 0:
+            return self._generate_chart_from_fallback()
         
         # 计算内存数据的最大值用于Y轴
         max_mem = max(max(app_rss_data) if app_rss_data else 0, max(app_vsz_data) if app_vsz_data else 0)
         max_mem = max_mem * 1.1 if max_mem > 0 else 100  # 留10%余量
         
         # 生成 JSON 数据供 JavaScript 使用
-        import json
-        
         return f"""
         <section id="perf-chart" class="card">
             <h2>3. 性能趋势</h2>
@@ -1529,6 +1429,108 @@ class PerformanceReportGenerator:
                     'appCpu': app_cpu_data,
                     'appRss': app_rss_data,
                     'appVsz': app_vsz_data
+                })};
+                var maxMemValue = {max_mem};
+                </script>
+            </div>
+        </section>
+        """
+    
+    def _generate_chart_from_fallback(self) -> str:
+        """从备用数据源(app_cpu.txt, app_status.txt)生成图表"""
+        app_cpu = self.data.get("files", {}).get("app_cpu.txt", "N/A")
+        app_status = self.data.get("files", {}).get("app_status.txt", "N/A")
+        
+        time_data = []
+        app_cpu_data = []
+        app_rss_data = []
+        app_vsz_data = []
+        
+        # 从 app_status.txt 获取 RSS 和 VSZ (这是最可靠的来源)
+        if app_status and app_status != "N/A" and app_status.strip():
+            # 解析 VmRSS 和 VmSize
+            rss_match = re.search(r"VmRSS:\s+(\d+)\s+kB", app_status)
+            vs_match = re.search(r"VmSize:\s+(\d+)\s+kB", app_status)
+            
+            if rss_match:
+                app_rss_data = [float(rss_match.group(1)) / 1024]  # KB to MB
+                time_data = ["0"]
+            
+            if vs_match:
+                app_vsz_data = [float(vs_match.group(1)) / 1024]  # KB to MB
+                if not time_data:
+                    time_data = ["0"]
+        
+        # 从 app_cpu.txt 获取 CPU 使用率 (top输出格式)
+        # top -b 输出: PID USER %CPU %MEM RSS VSZ TTY STAT START TIME COMMAND
+        # 示例: " 3198   309 root     R     626m 72.4   0 14.2 ./kanzi"
+        # 列: VSZ=%MEM, RSS=实际内存值, SHR=0, CPU=CPU%
+        if app_cpu and app_cpu != "N/A" and app_cpu.strip():
+            lines = app_cpu.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # 格式: " 3198   309 root     R     626m 72.4   0 14.2 ./kanzi"
+                # 列5=VSZ(MB) 列6=%MEM 列7=SHR 列8=CPU%
+                match = re.match(r'\s*(\d+)\s+\d+\s+\S+\s+\S+\s+(\S+)\s+(\S+)\s+\S+\s+(\S+)', line)
+                if match:
+                    cpu_val = match.group(4)  # CPU%
+                    time_data = ["0"]
+                    
+                    try:
+                        app_cpu_data.append(float(cpu_val))
+                    except:
+                        app_cpu_data.append(None)
+                    break
+        
+        # 检查是否有有效数据
+        has_cpu = any(v is not None for v in app_cpu_data)
+        has_rss = any(v is not None for v in app_rss_data)
+        has_vsz = any(v is not None for v in app_vsz_data)
+        
+        if not has_cpu and not has_rss and not has_vsz:
+            return """
+        <section id="perf-chart" class="card">
+            <h2>3. 性能趋势</h2>
+            <div class="no-data">暂无性能数据，请运行采集脚本获取数据</div>
+        </section>
+            """
+        
+        # 计算内存数据的最大值用于Y轴
+        max_mem = 100
+        valid_rss = [v for v in app_rss_data if v is not None]
+        valid_vsz = [v for v in app_vsz_data if v is not None]
+        if valid_rss:
+            max_mem = max(max_mem, max(valid_rss) * 1.2)
+        if valid_vsz:
+            max_mem = max(max_mem, max(valid_vsz) * 1.2)
+        
+        # 判断数据来源
+        data_source_note = ""
+        if time_data == ["0"] and len(time_data) == 1:
+            data_source_note = """
+            <div class="issue success" style="margin-bottom: 15px;">
+                <h4>数据来源: 进程快照数据</h4>
+                <p>数据从 app_status.txt 获取 (单次采样)。如需趋势数据，请重新运行采集脚本。</p>
+            </div>
+            """
+        
+        return f"""
+        <section id="perf-chart" class="card">
+            <h2>3. 性能趋势</h2>
+            {data_source_note}
+            
+            <div class="chart-container">
+                <h3>应用性能趋势 (CPU、内存)</h3>
+                <canvas id="perfChart"></canvas>
+                <script>
+                var perfChartData = {json.dumps({
+                    'times': time_data if time_data else ["0"],
+                    'appCpu': app_cpu_data if app_cpu_data else [0],
+                    'appRss': app_rss_data if app_rss_data else [0],
+                    'appVsz': app_vsz_data if app_vsz_data else [0]
                 })};
                 var maxMemValue = {max_mem};
                 </script>
@@ -1657,7 +1659,6 @@ class PerformanceReportGenerator:
         """生成图形渲染优化章节"""
         opengl_info = self.data.get("files", {}).get("opengl_info.txt", "N/A")
         vulkan_info = self.data.get("files", {}).get("vulkan_info.txt", "N/A")
-        gpu_allocs = self.data.get("files", {}).get("gpu_memory_allocs.txt", "N/A")
         drm_traces = self.data.get("files", {}).get("drm_traces.txt", "N/A")
 
         # 解析OpenGL版本
@@ -1689,23 +1690,20 @@ class PerformanceReportGenerator:
         <section id="graphics" class="card">
             <h2>7. 图形渲染分析</h2>
 
-            <h3>GPU信息</h3>
+            <h3>图形API信息</h3>
             <table>
                 <tr><th>项目</th><th>值</th></tr>
                 <tr><td>OpenGL版本</td><td>{gl_version}</td></tr>
-                <tr><td>GPU渲染器</td><td>{gl_renderer}</td></tr>
+                <tr><td>渲染器</td><td>{gl_renderer}</td></tr>
                 <tr><td>支持的纹理压缩</td><td>{formats_str}</td></tr>
             </table>
-
-            <h3>GPU内存状态</h3>
-            <pre>{self._escape_html(gpu_allocs[:2000]) if gpu_allocs and gpu_allocs != 'N/A' else '不可用'}</pre>
 
             {self._generate_graphics_optimization_suggestions(texture_formats, gl_version)}
 
             <div class="issue success">
                 <h4>图形优化检查清单</h4>
                 <ul style="margin: 10px 0 10px 20px;">
-                    <li>□ 使用GPU压缩纹理减少内存带宽占用</li>
+                    <li>□ 使用压缩纹理减少内存带宽占用</li>
                     <li>□ 合并绘制调用，使用实例化渲染</li>
                     <li>□ 实现帧率限制，避免无意义的过高帧率</li>
                     <li>□ 检查是否有冗余的状态切换</li>
@@ -1730,7 +1728,7 @@ class PerformanceReportGenerator:
         elif 'BC' in texture_formats or 'DXT' in texture_formats:
             suggestions.append("推荐使用BC/DXT纹理格式，适合桌面GPU，可显著减少显存占用。")
         else:
-            suggestions.append("建议评估是否可使用GPU压缩纹理格式，当前GPU支持的压缩格式有限。")
+            suggestions.append("建议评估是否可使用压缩纹理格式以优化内存使用。")
 
         # OpenGL版本建议
         if 'ES 2' in gl_version or 'OpenGL ES 2' in gl_version:
@@ -1778,13 +1776,13 @@ class PerformanceReportGenerator:
 
             <h3>通用优化策略</h3>
             <div class="suggestion">
-                <h4>GPU渲染优化</h4>
-                <p>针对嵌入式系统的GPU优化建议：</p>
+                <h4>渲染优化</h4>
+                <p>针对嵌入式系统的图形优化建议：</p>
                 <ul style="margin: 10px 0 10px 20px;">
-                    <li>使用GPU友好的纹理格式（如ETC、ASTC）</li>
+                    <li>使用高效的纹理格式（如ETC、ASTC）</li>
                     <li>合并绘制调用，减少draw call数量</li>
                     <li>使用实例化渲染处理大量相似物体</li>
-                    <li>启用GPU压缩纹理减少带宽占用</li>
+                    <li>启用纹理压缩减少带宽占用</li>
                 </ul>
             </div>
             
