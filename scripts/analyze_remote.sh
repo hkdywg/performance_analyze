@@ -102,7 +102,7 @@ check_dependencies() {
     
     local missing_tools=()
     
-    for tool in ssh scp yaml python3; do
+    for tool in ssh scp python3; do
         if ! command -v $tool &> /dev/null; then
             missing_tools+=("$tool")
         fi
@@ -154,33 +154,54 @@ except Exception as e:
 
 load_config() {
     log_info "读取配置文件: ${CONFIG_FILE}"
-    
+
     # 转换为绝对路径
     local abs_config_file="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")"
     export YAML_CONFIG_FILE="$abs_config_file"
     CONFIG_JSON=$(parse_yaml "$abs_config_file")
-    
+
     SSH_HOST=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh',{}).get('host',''))")
     SSH_PORT=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh',{}).get('port','22'))")
     SSH_USER=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh',{}).get('user','root'))")
     SSH_KEY=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh',{}).get('key_path',''))")
     SSH_PASS=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh',{}).get('password',''))")
-    
+
+    # 解析密钥路径为绝对路径
+    if [ -n "$SSH_KEY" ]; then
+        SSH_KEY=$(eval echo "$SSH_KEY")
+        if [ -f "$SSH_KEY" ]; then
+            log_info "  SSH密钥文件存在: ${SSH_KEY}"
+        else
+            log_warning "  SSH密钥文件不存在: ${SSH_KEY}，将使用密码认证"
+            SSH_KEY=""
+        fi
+    fi
+
+    # 导出变量供子函数使用
+    export SSH_HOST SSH_PORT SSH_USER SSH_KEY SSH_PASS
+
     APP_NAME=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('target',{}).get('app_name',''))")
     PROCESS_PATTERN=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('target',{}).get('process_pattern',''))")
     DISPLAY_SERVER=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('target',{}).get('display_server','wayland'))")
     COMPOSITOR=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('target',{}).get('compositor','weston'))")
-    
+
     DURATION=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('analysis',{}).get('duration','10'))")
     INTERVAL=$(echo "$CONFIG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('analysis',{}).get('interval','1'))")
-    
+
     if [ -z "$SSH_HOST" ] || [ -z "$APP_NAME" ]; then
         log_error "配置文件缺少必要字段: ssh.host 或 target.app_name"
         exit 1
     fi
-    
+
     log_success "配置加载完成"
     log_info "  SSH: ${SSH_USER}@${SSH_HOST}:${SSH_PORT}"
+    if [ -n "$SSH_KEY" ]; then
+        log_info "  认证方式: SSH密钥"
+    elif [ -n "$SSH_PASS" ]; then
+        log_info "  认证方式: 密码"
+    else
+        log_warning "  认证方式: 无密码（可能需要手动输入）"
+    fi
     log_info "  目标应用: ${APP_NAME}"
     log_info "  显示服务器: ${DISPLAY_SERVER}"
 }
@@ -197,18 +218,6 @@ ssh_cmd() {
         ssh_key_file=$(eval echo "$SSH_KEY")
         if [ ! -f "$ssh_key_file" ]; then
             ssh_key_file=""
-        fi
-    fi
-
-    # 优先使用密钥认证
-    if [ -n "$ssh_key_file" ]; then
-        if ssh -p "$SSH_PORT" -i "$ssh_key_file" \
-            -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=10 \
-            -o BatchMode=yes \
-            -o PasswordAuthentication=no \
-            "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null; then
-            return 0
         fi
     fi
 
@@ -289,11 +298,150 @@ PYEOF
         return $?
     fi
 
+    # 使用密钥认证
+    if [ -n "$ssh_key_file" ]; then
+        ssh -p "$SSH_PORT" -i "$ssh_key_file" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o BatchMode=yes \
+            -o PasswordAuthentication=no \
+            "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null
+        return $?
+    fi
+
     # 最后尝试无密码连接
     ssh -p "$SSH_PORT" \
         -o StrictHostKeyChecking=no \
         -o ConnectTimeout=10 \
         "${SSH_USER}@${SSH_HOST}" "$cmd" 2>/dev/null
+}
+
+#-------------------------------------------------------------------------------
+# SCP文件拷贝函数 - 使用SSH远程执行cat传输
+#-------------------------------------------------------------------------------
+scp_copy() {
+    local remote_file="$1"
+    local local_file="$2"
+
+    # 检查参数
+    if [ -z "$remote_file" ] || [ -z "$local_file" ]; then
+        log_error "scp_copy: 缺少参数"
+        return 1
+    fi
+
+    # 确保local_file是文件路径，不是目录
+    if [ -d "$local_file" ]; then
+        log_error "scp_copy: 目标路径是目录而非文件: ${local_file}"
+        return 1
+    fi
+
+    # 确保输出目录存在
+    local local_dir="$(dirname "$local_file")"
+    if [ -n "$local_dir" ] && [ "$local_dir" != "." ]; then
+        mkdir -p "$local_dir"
+    fi
+
+    log_info "使用SSH方式拷贝文件: ${remote_file} -> ${local_file}"
+
+    # 使用 sshpass（最可靠）
+    if [ -n "$SSH_PASS" ] && command -v sshpass &> /dev/null; then
+        log_info "使用sshpass认证拷贝文件..."
+        sshpass -p "$SSH_PASS" ssh -p "$SSH_PORT" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            "${SSH_USER}@${SSH_HOST}" "cat ${remote_file}" > "$local_file" 2>/dev/null
+        return $?
+    fi
+
+    # 使用 Python paramiko（如果可用）
+    if [ -n "$SSH_PASS" ]; then
+        local py_script
+        py_script=$(mktemp /tmp/scp_copy_XXXXXX.py)
+
+        cat > "$py_script" << 'PYEOF'
+#!/usr/bin/env python3
+import sys
+import os
+import paramiko
+
+host = os.environ.get("SSH_HOST", "")
+port = int(os.environ.get("SSH_PORT", "22"))
+user = os.environ.get("SSH_USER", "")
+password = os.environ.get("SSH_PASS", "")
+remote_path = sys.argv[1] if len(sys.argv) > 1 else ""
+local_path = sys.argv[2] if len(sys.argv) > 2 else ""
+
+try:
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(hostname=host, port=port, username=user, password=password, timeout=30)
+    stdin, stdout, stderr = client.exec_command(f'cat {remote_path}', timeout=120)
+    data = stdout.read()
+    client.close()
+    with open(local_path, 'wb') as f:
+        f.write(data)
+except Exception as e:
+    print(f"SSH error: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+        chmod +x "$py_script"
+        export SSH_HOST SSH_PORT SSH_USER SSH_PASS
+        log_info "使用Python paramiko拷贝文件..."
+        "$py_script" "$remote_file" "$local_file"
+        local result=$?
+        rm -f "$py_script"
+        return $result
+    fi
+
+    # 使用 expect 作为最后方案
+    if [ -n "$SSH_PASS" ] && command -v expect &> /dev/null; then
+        log_info "使用expect拷贝文件..."
+        expect -c "
+            set timeout 120
+            spawn ssh -p ${SSH_PORT} -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} cat ${remote_file}
+            expect {
+                \"password:\" {
+                    send \"${SSH_PASS}\r\"
+                    expect eof
+                }
+                \"yes/no\" {
+                    send \"yes\r\"
+                    expect \"password:\"
+                    send \"${SSH_PASS}\r\"
+                    expect eof
+                }
+                timeout {
+                    exit 1
+                }
+                eof {
+                    exit 1
+                }
+            }
+        " > "$local_file" 2>/dev/null
+        return $?
+    fi
+
+    # 解析密钥路径为绝对路径
+    local ssh_key_file=""
+    if [ -n "$SSH_KEY" ]; then
+        ssh_key_file=$(eval echo "$SSH_KEY")
+        if [ -f "$ssh_key_file" ]; then
+            log_info "使用SSH密钥认证拷贝文件..."
+            ssh -p "$SSH_PORT" -i "$ssh_key_file" \
+                -o StrictHostKeyChecking=no \
+                -o ConnectTimeout=10 \
+                "${SSH_USER}@${SSH_HOST}" "cat ${remote_file}" > "$local_file" 2>/dev/null
+            return $?
+        fi
+    fi
+
+    # 最后尝试无密码连接
+    log_warning "尝试无密码连接..."
+    ssh -p "$SSH_PORT" \
+        -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=10 \
+        "${SSH_USER}@${SSH_HOST}" "cat ${remote_file}" > "$local_file" 2>/dev/null
 }
 
 #-------------------------------------------------------------------------------
@@ -536,188 +684,129 @@ collect_system_load() {
 }
 
 #-------------------------------------------------------------------------------
-# 采集火焰图数据 (perf)
+# 采集火焰图数据 (使用perf + FlameGraph)
+# 流程：远程采集perf.data -> 拷贝到本地 -> 本地生成火焰图
 #-------------------------------------------------------------------------------
 collect_flamegraph_data() {
     log_info "采集火焰图数据..."
+
+
+    # 检查本地FlameGraph工具
+    local local_flamegraph="${PROJECT_DIR}/FlameGraph"
+    if [ ! -f "${local_flamegraph}/flamegraph.pl" ]; then
+        log_warning "本地FlameGraph工具不存在: ${local_flamegraph}"
+        echo "本地FlameGraph工具不存在" > "${OUTPUT_DIR}/perf_record.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
+        return
+    fi
+
+    if [ ! -f "${local_flamegraph}/stackcollapse-perf.pl" ]; then
+        log_warning "本地stackcollapse-perf.pl不存在"
+        echo "本地stackcollapse-perf.pl不存在" > "${OUTPUT_DIR}/perf_record.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
+        return
+    fi
 
     if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ] || [ "$APP_PID" = "" ]; then
         log_warning "未找到目标进程PID，跳过火焰图采集"
         echo "N/A" > "${OUTPUT_DIR}/perf_record.txt"
         echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
-        echo "N/A" > "${OUTPUT_DIR}/flamegraph.svg"
-        echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
         return
     fi
 
-    # 检查perf是否可用
+    # 检查远程perf是否可用
     local perf_available=$(ssh_cmd "which perf 2>/dev/null || echo 'not_found'" | tr -d '\r\n')
     if [ "$perf_available" = "not_found" ]; then
-        log_warning "perf工具不可用，尝试使用其他方法"
-        # 尝试使用 /proc/profile 或其他替代方案
-        collect_stack_traces_alternative
+        log_warning "远程perf工具不可用，跳过火焰图采集"
+        echo "远程perf不可用" > "${OUTPUT_DIR}/perf_record.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
         return
     fi
 
     log_info "使用perf record采集PID=${APP_PID}的调用栈..."
 
-    # 清理旧数据
-    ssh_cmd "rm -f /tmp/perf.data"
+    # 清理远程旧数据
+    ssh_cmd "rm -f /tmp/perf.data /tmp/perf.svg /tmp/perf.log"
 
-    # 使用perf record采集数据（系统级采集，指定输出文件）
+    # 使用perf record采集数据（系统级采集，带调用栈）
     # 使用nohup确保命令在远程后台运行
-    ssh_cmd "rm -f /tmp/perf.data && nohup sh -c 'perf record -F 99 -a -g -o /tmp/perf.data -- sleep ${DURATION}' > /tmp/perf.log 2>&1 &"
+    ssh_cmd "rm -f /tmp/perf.data && nohup sh -c 'perf record -F 99 -p ${APP_PID} -a -g -o /tmp/perf.data -- sleep ${DURATION}' > /tmp/perf.log 2>&1 &"
     log_info "perf record正在后台运行..."
 
     # 等待采集完成
-    sleep $((DURATION + 5))
+    sleep $((DURATION + 2))
 
-    # 获取perf.data文件
-    local perf_data_exists=$(ssh_cmd "ls -la /tmp/perf.data 2>/dev/null | wc -l" | tr -d '\r\n')
-    if [ "$perf_data_exists" != "0" ] && [ -n "$perf_data_exists" ]; then
-        log_info "perf.data 大小: ${perf_size} bytes"
-
-        # 生成perf报告（带调用栈）
-        ssh_cmd "perf report --stdio -g none -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
-
-        # 生成调用栈文本（用于火焰图）
-        ssh_cmd "perf script -i /tmp/perf.data 2>/dev/null | stackcollapse-perf.pl 2>/dev/null || perf script -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/stack_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
-
-        # 生成热点函数详细调用栈
-        generate_hot_functions_stacks
-
-        log_success "火焰图数据采集完成"
-    else
+    # 检查perf.data文件是否存在
+    local perf_data_exists=$(ssh_cmd "test -f /tmp/perf.data && echo 'yes' || echo 'no'" | tr -d '\r\n')
+    if [ "$perf_data_exists" != "yes" ]; then
         log_warning "perf record未能生成数据文件"
-        echo "采集失败" > "${OUTPUT_DIR}/perf_record.txt"
-        echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
-        echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
-    fi
-}
-
-#-------------------------------------------------------------------------------
-# 备选方案：采集调用栈（不使用perf）
-#-------------------------------------------------------------------------------
-collect_stack_traces_alternative() {
-    log_info "使用备选方案采集调用栈..."
-
-    if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ]; then
-        echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+        echo "采集失败" > "${OUTPUT_DIR}/perf_report.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
         return
     fi
 
-    # 使用 /proc/PID/stack 获取内核栈
-    ssh_cmd "cat /proc/${APP_PID}/stack 2>/dev/null" > "${OUTPUT_DIR}/kernel_stack.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/kernel_stack.txt"
+    # 获取perf.data大小
+    local perf_size=$(ssh_cmd "ls -la /tmp/perf.data 2>/dev/null | awk '{print \$5}'" | tr -d '\r\n')
+    log_info "perf.data 大小: ${perf_size} bytes"
 
-    # 获取线程栈信息
-    local tids=$(ssh_cmd "ls /proc/${APP_PID}/task/ 2>/dev/null" | tr -d '\r\n' || echo "")
-    if [ -n "$tids" ]; then
-        ssh_cmd "for tid in ${tids}; do echo \"=== TID: \$tid ===\"; cat /proc/${APP_PID}/task/\$tid/stack 2>/dev/null; done" > "${OUTPUT_DIR}/thread_stacks.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/thread_stacks.txt"
+    # 拷贝perf.data到本地
+    log_info "拷贝perf.data到本地..."
+    local perf_data_local="${OUTPUT_DIR}/perf.data"
+    scp_copy "/tmp/perf.data" "$perf_data_local"
+    local local_size=$(wc -c < "$perf_data_local" 2>/dev/null || echo "0")
+
+    if [ -z "$local_size" ] || [ "$local_size" -lt 1000 ]; then
+        log_warning "perf.data拷贝失败或文件过小"
+        echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
+        return
     fi
 
-    # 尝试使用 eBPF / funccount（如可用）
-    local bcc_available=$(ssh_cmd "which funccount 2>/dev/null || echo 'not_found'" | tr -d '\r\n')
-    if [ "$bcc_available" != "not_found" ]; then
-        log_info "使用 BCC/funccount 采集函数调用频率..."
-        ssh_cmd "funccount -d 5 'gl*' 'egl*' 'drm*' 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/function_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/function_counts.txt"
+    log_info "本地perf.data大小: ${local_size} bytes"
+
+    # 清理远程perf.data
+    #ssh_cmd "rm -f /tmp/perf.data"
+
+    # 本地生成火焰图 SVG
+    log_info "本地生成火焰图..."
+
+    # 检查本地perf工具
+    if command -v perf &> /dev/null; then
+        local perf_cmd="perf"
+    elif [ -f "/usr/bin/perf" ]; then
+        local perf_cmd="/usr/bin/perf"
     else
-        echo "N/A" > "${OUTPUT_DIR}/function_counts.txt"
-    fi
-
-    # 使用 strace 采样（短时间）
-    log_info "使用strace采样系统调用..."
-    ssh_cmd "timeout 5 strace -p ${APP_PID} -c -f 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/syscall_counts.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/syscall_counts.txt"
-
-    log_success "备选方案数据采集完成"
-}
-
-#-------------------------------------------------------------------------------
-# 生成热点函数详细调用栈
-#-------------------------------------------------------------------------------
-generate_hot_functions_stacks() {
-    log_info "生成热点函数详细调用栈..."
-    
-    # 创建热点函数调用栈文件
-    {
-        echo "========================================"
-        echo "热点函数详细调用栈分析"
-        echo "========================================"
-        echo "采集时间: $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "进程PID: ${APP_PID}"
-        echo "采样时长: ${DURATION}秒"
-        echo ""
-    } > "${OUTPUT_DIR}/hot_functions_stacks.txt"
-
-    # 获取热点函数列表（前20个）
-    local hot_functions=$(ssh_cmd "perf report --stdio -g none -i /tmp/perf.data 2>/dev/null | grep -E '^\s+[0-9]+\.' | head -20" 2>/dev/null | tr -d '\r')
-    
-    if [ -z "$hot_functions" ] || [ "$hot_functions" = "N/A" ]; then
-        echo "无法获取热点函数数据" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+        log_warning "本地perf工具不可用，无法生成火焰图"
+        echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
         return
     fi
 
-    {
-        echo "Top 20 热点函数:"
-        echo "----------------------------------------"
-        echo "$hot_functions"
-        echo ""
-        echo "========================================"
-        echo "热点函数调用栈详情"
-        echo "========================================"
-        echo ""
-    } >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
-
-    # 使用 perf script 获取完整调用栈数据
-    local stack_data=$(ssh_cmd "perf script -i /tmp/perf.data --no-inline 2>/dev/null" 2>&1 | head -5000)
-    
-    # 提取函数名
-    local func_names=$(echo "$hot_functions" | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*' | sort -u | head -15)
-    
-    local func_count=1
-    for func in $func_names; do
-        # 跳过太短或太通用的函数名
-        [ ${#func} -lt 4 ] && continue
-        [[ "$func" == "unknown" ]] && continue
-        [[ "$func" == "[]" ]] && continue
-        
-        {
-            echo "----------------------------------------"
-            echo "[$func_count] 函数: $func"
-            echo "----------------------------------------"
-        } >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
-        
-        # 查找该函数的调用栈
-        local func_stacks=$(echo "$stack_data" | grep -B 30 "$func" | head -35)
-        
-        if [ -n "$func_stacks" ]; then
-            echo "调用链 (最多显示30层):" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
-            echo "$func_stacks" | sed 's/^/  /' >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+    # 生成火焰图
+    if sudo $perf_cmd script -f -i "$perf_data_local"  | "${local_flamegraph}/stackcollapse-perf.pl" | "${local_flamegraph}/flamegraph.pl"  > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
+        local svg_size=$(wc -c < "${OUTPUT_DIR}/perf_flamegraph.svg" 2>/dev/null || echo "0")
+        if [ -n "$svg_size" ] && [ "$svg_size" -gt 1000 ]; then
+            log_success "火焰图已生成，大小: ${svg_size} bytes"
         else
-            echo "  无详细调用栈数据" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+            log_warning "火焰图文件过小，可能生成失败"
+            echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
         fi
-        
-        echo "" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
-        func_count=$((func_count + 1))
-        [ $func_count -gt 10 ] && break
-    done
-
-    # 添加调用关系
-    {
-        echo "========================================"
-        echo "函数调用关系 (Caller -> Callee)"
-        echo "========================================"
-    } >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
-    
-    # 使用 perf report --graph 生成调用关系
-    local call_graph=$(ssh_cmd "perf report --stdio --graph-function='.*' -g caller -i /tmp/perf.data 2>/dev/null | head -200" 2>&1 | tr -d '\r')
-    
-    if [ -n "$call_graph" ] && [ "$call_graph" != "N/A" ]; then
-        echo "$call_graph" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
     else
-        echo "  (调用关系数据不可用)" >> "${OUTPUT_DIR}/hot_functions_stacks.txt"
+        log_warning "火焰图生成失败，尝试使用备用参数..."
+        # 尝试不使用 -f 参数
+        if $perf_cmd script -i "$perf_data_local" 2>/dev/null | "${local_flamegraph}/stackcollapse-perf.pl" 2>/dev/null | "${local_flamegraph}/flamegraph.pl" --bgcolor='#1a1a2e' > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
+            local svg_size=$(wc -c < "${OUTPUT_DIR}/perf_flamegraph.svg" 2>/dev/null || echo "0")
+            if [ -n "$svg_size" ] && [ "$svg_size" -gt 1000 ]; then
+                log_success "火焰图已生成(备用模式)，大小: ${svg_size} bytes"
+            else
+                echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
+            fi
+        else
+            log_warning "火焰图生成失败"
+            echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
+        fi
     fi
 
-    log_success "热点函数调用栈已保存到 hot_functions_stacks.txt"
+    log_success "火焰图数据采集完成"
 }
 
 #-------------------------------------------------------------------------------
@@ -849,14 +938,17 @@ if not output_dir:
 with open(output_file, 'r') as f:
     data = json.load(f)
 
-# 添加所有txt和csv文件内容
+# 添加所有txt、csv和svg文件内容
 for filename in os.listdir(output_dir):
-    if filename.endswith('.txt') or filename.endswith('.csv'):
+    if filename.endswith('.txt') or filename.endswith('.csv') or filename.endswith('.svg'):
         filepath = os.path.join(output_dir, filename)
         try:
             with open(filepath, 'r') as f:
                 content = f.read()
-                data['files'][filename] = content[:100000]  # 增大限制
+                if filename.endswith('.svg'):
+                    data['files'][filename] = content  # SVG文件不做截断
+                else:
+                    data['files'][filename] = content[:100000]  # 增大限制
         except Exception as e:
             data['files'][filename] = f'Error reading file: {e}'
 
@@ -873,37 +965,35 @@ print('JSON summary generated')
 # 主函数
 #-------------------------------------------------------------------------------
 main() {
-    
-    #check_dependencies
+
+    check_dependencies
     load_config
     setup_output
     test_connection
-    
+
     log_info "开始采集性能数据..."
-    
+
     collect_system_info
     collect_memory_info
-    
+
     if [ "$DISPLAY_SERVER" = "wayland" ]; then
         collect_wayland_info
     else
         collect_drm_info
     fi
-    
+
     collect_app_info
+    collect_flamegraph_data
     collect_system_load
 
     # 周期性采样 CPU 和内存（用于折线图）
     collect_performance_samples
 
-    # 火焰图数据采集
-    collect_flamegraph_data
-
     # 图形API追踪
     collect_graphics_traces
 
     generate_json_summary
-    
+
     log_info "采集的数据保存在: ${OUTPUT_DIR}"
 }
 
