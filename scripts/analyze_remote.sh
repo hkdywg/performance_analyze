@@ -917,32 +917,7 @@ collect_flamegraph_data() {
     # 生成perf report（热点函数列表）
     log_info "生成perf报告..."
     
-    if [ "$HAS_CALLCHAIN" = "2" ]; then
-        # sudo不可用，生成提示信息
-        log_warning "sudo权限不足，跳过本地perf报告生成"
-        echo "# === perf报告生成失败 ===" > "${OUTPUT_DIR}/perf_report.txt"
-        echo "# 原因：sudo权限不足，无法访问perf.data" >> "${OUTPUT_DIR}/perf_report.txt"
-        echo "# " >> "${OUTPUT_DIR}/perf_report.txt"
-        echo "# 请手动运行以下命令生成perf报告：" >> "${OUTPUT_DIR}/perf_report.txt"
-        echo "#   sudo perf report -i ${perf_data_local} --stdio -g none | head -80" >> "${OUTPUT_DIR}/perf_report.txt"
-        echo "# " >> "${OUTPUT_DIR}/perf_report.txt"
-        echo "# 或者使用带调用链的报告（如果perf.data有调用链数据）：" >> "${OUTPUT_DIR}/perf_report.txt"
-        echo "#   sudo perf report -i ${perf_data_local} -g --stdio -n 20 | head -150" >> "${OUTPUT_DIR}/perf_report.txt"
-    elif [ "$HAS_CALLCHAIN" = "1" ]; then
-        # 使用 -g -n 20 生成带调用栈的报告
-        generate_perf_report "$perf_data_local" "${OUTPUT_DIR}/perf_report.txt" "1"
-        local report_size=$(wc -c < "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "0")
-        if [ -z "$report_size" ] || [ "$report_size" -lt 100 ]; then
-            log_warning "perf报告文件过小，使用非调用栈模式..."
-            generate_perf_report "$perf_data_local" "${OUTPUT_DIR}/perf_report.txt" "0"
-        else
-            log_success "perf报告已生成，大小: ${report_size} bytes"
-        fi
-    else
-        # 使用非调用栈模式
-        log_info "使用非调用栈模式生成perf报告..."
-        generate_perf_report "$perf_data_local" "${OUTPUT_DIR}/perf_report.txt" "0"
-    fi
+    ssh_cmd "perf report --stdio -g none -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
     
     # 检查生成的报告
     local report_size=$(wc -c < "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "0")
