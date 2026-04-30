@@ -683,6 +683,7 @@ collect_system_load() {
     log_success "系统负载信息采集完成"
 }
 
+
 #-------------------------------------------------------------------------------
 # 采集火焰图数据 (使用perf + FlameGraph)
 # 流程：远程采集perf.data -> 拷贝到本地 -> 本地生成火焰图
@@ -767,9 +768,6 @@ collect_flamegraph_data() {
     # 清理远程perf.data
     #ssh_cmd "rm -f /tmp/perf.data"
 
-    # 本地生成火焰图 SVG
-    log_info "本地生成火焰图..."
-
     # 检查本地perf工具
     if command -v perf &> /dev/null; then
         local perf_cmd="perf"
@@ -777,12 +775,253 @@ collect_flamegraph_data() {
         local perf_cmd="/usr/bin/perf"
     else
         log_warning "本地perf工具不可用，无法生成火焰图"
+        echo "perf工具不可用" > "${OUTPUT_DIR}/perf_record.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_report.txt"
         echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
         return
     fi
 
+    # 生成perf报告的辅助函数
+    generate_perf_report() {
+        local perf_data_path="$1"
+        local output_file="$2"
+        local use_callgraph="${3:-1}"
+        
+        if [ "$use_callgraph" = "1" ]; then
+            # 使用调用链模式
+            sudo $perf_cmd report -i "$perf_data_path" -g --stdio -n 20 2>&1 | head -150 > "$output_file"
+        else
+            # 不使用调用链
+            sudo $perf_cmd report -i "$perf_data_path" --stdio -g none 2>&1 | head -80 > "$output_file"
+        fi
+    }
+
+    # 生成热点函数调用栈详情的函数
+    # 从 perf report 中提取热点函数及其调用栈，生成结构化文本文件
+    generate_hot_functions_stacks() {
+        local perf_data_path="$1"
+        local output_file="$2"
+        
+        log_info "生成热点函数调用栈详情..."
+        
+        # 创建输出文件
+        : > "$output_file"
+        
+        # 检查是否有调用链数据
+        local has_callgraph
+        has_callgraph=$(sudo $perf_cmd report -i "$perf_data_path" -g --stdio 2>&1 | grep -c "callchain" || echo "0")
+        
+        if [ "$has_callgraph" = "0" ]; then
+            log_warning "perf.data没有调用链数据，跳过热点函数调用栈生成"
+            echo "# === 热点函数调用栈 ===" >> "$output_file"
+            echo "# 状态: 无调用链数据" >> "$output_file"
+            echo "# 说明: perf.data采集时未使用 -g 参数，没有调用栈信息" >> "$output_file"
+            echo "# " >> "$output_file"
+            echo "# 解决方案: 重新采集perf数据，使用 -g 参数" >> "$output_file"
+            echo "#   perf record -F 99 -p <PID> -a -g -o /tmp/perf.data -- sleep 10" >> "$output_file"
+            return
+        fi
+        
+        # 获取热点函数列表和调用栈
+        local perf_output
+        perf_output=$(sudo $perf_cmd report -i "$perf_data_path" -g --stdio 2>&1) || true
+        
+        if [ -z "$perf_output" ]; then
+            log_warning "无法获取perf报告数据"
+            echo "# === 热点函数调用栈 ===" >> "$output_file"
+            echo "# 状态: 无法获取数据" >> "$output_file"
+            return
+        fi
+        
+        echo "# === 热点函数调用栈 ===" >> "$output_file"
+        echo "# 状态: 成功" >> "$output_file"
+        echo "#" >> "$output_file"
+        
+        # 解析perf报告，提取热点函数及其调用栈
+        local current_func=""
+        local current_pct=""
+        local in_stack=0
+        
+        echo "$perf_output" | while IFS= read -r line; do
+            # 跳过空行和注释
+            [ -z "$line" ] && continue
+            [[ "$line" =~ ^# ]] && continue
+            
+            # 检测新的热点函数行
+            if [[ "$line" =~ ^[[:space:]]*([0-9]+\.?[0-9]*)%[[:space:]]+[0-9]+\.?[0-9]*%[[:space:]]+([^[:space:]]+)[[:space:]]+([^\[:space:]]+) ]]; then
+                # 保存前一个函数
+                [ -n "$current_func" ] && echo "" >> "$output_file"
+                
+                current_pct="${BASH_REMATCH[1]}"
+                local module="${BASH_REMATCH[3]}"
+                
+                # 提取地址
+                local addr_val=""
+                if [[ "$line" =~ \[.\][[:space:]]+(0x[0-9a-f]+) ]]; then
+                    addr_val="${BASH_REMATCH[1]}"
+                    current_func="$addr_val"
+                elif [[ "$line" =~ \[k\][[:space:]]+(0x[0-9a-f]+) ]]; then
+                    addr_val="${BASH_REMATCH[1]}"
+                    current_func="[k]$addr_val"
+                else
+                    current_func="$module"
+                fi
+                
+                # 输出函数信息
+                echo "FUNC: $current_func PCT: $current_pct%" >> "$output_file"
+                in_stack=1
+            # 检测调用栈中的函数调用
+            elif [ "$in_stack" = "1" ] && [[ "$line" =~ ^[[:space:]]+\|+ ]]; then
+                # 提取调用栈中的地址
+                if [[ "$line" =~ 0x([0-9a-f]+) ]]; then
+                    local addr="${BASH_REMATCH[1]}"
+                    # 计算缩进深度
+                    local indent=${#line}
+                    indent=${indent%%[^|]*}  # 移除非管道字符前的部分
+                    local depth=${#indent}
+                    depth=$((depth / 2))
+                    
+                    # 判断是内核还是用户地址
+                    if [[ "$addr" =~ ^ffff ]]; then
+                        echo "  STACK[$depth]: kernel:0x${addr: -8}" >> "$output_file"
+                    else
+                        echo "  STACK[$depth]: app:0x${addr: -8}" >> "$output_file"
+                    fi
+                fi
+            # 检测新的热点函数（缩进减少）
+            elif [ "$in_stack" = "1" ] && [[ "$line" =~ ^[[:space:]]*[^|] ]]; then
+                if [[ "$line" =~ ^[0-9] ]]; then
+                    in_stack=0
+                fi
+            fi
+        done
+        
+        log_success "热点函数调用栈详情已生成"
+    }
+
+    # 检查perf.data是否有调用链数据
+    log_info "检查perf.data调用链数据..."
+    local perf_check_output
+    perf_check_output=$(sudo $perf_cmd report -i "$perf_data_local" -g --stdio 2>&1 | head -10) || true
+    
+    if echo "$perf_check_output" | grep -qi "no callchain\|no branch\|no data"; then
+        log_warning "perf.data没有调用链数据，将使用非调用栈模式生成报告"
+        HAS_CALLCHAIN=0
+    elif echo "$perf_check_output" | grep -qi "password\|permission denied\|requires"; then
+        log_warning "sudo权限不足，跳过perf报告生成"
+        HAS_CALLCHAIN=2  # 特殊标记：sudo不可用
+    else
+        HAS_CALLCHAIN=1
+    fi
+
+    # 生成perf report（热点函数列表）
+    log_info "生成perf报告..."
+    
+    if [ "$HAS_CALLCHAIN" = "2" ]; then
+        # sudo不可用，生成提示信息
+        log_warning "sudo权限不足，跳过本地perf报告生成"
+        echo "# === perf报告生成失败 ===" > "${OUTPUT_DIR}/perf_report.txt"
+        echo "# 原因：sudo权限不足，无法访问perf.data" >> "${OUTPUT_DIR}/perf_report.txt"
+        echo "# " >> "${OUTPUT_DIR}/perf_report.txt"
+        echo "# 请手动运行以下命令生成perf报告：" >> "${OUTPUT_DIR}/perf_report.txt"
+        echo "#   sudo perf report -i ${perf_data_local} --stdio -g none | head -80" >> "${OUTPUT_DIR}/perf_report.txt"
+        echo "# " >> "${OUTPUT_DIR}/perf_report.txt"
+        echo "# 或者使用带调用链的报告（如果perf.data有调用链数据）：" >> "${OUTPUT_DIR}/perf_report.txt"
+        echo "#   sudo perf report -i ${perf_data_local} -g --stdio -n 20 | head -150" >> "${OUTPUT_DIR}/perf_report.txt"
+    elif [ "$HAS_CALLCHAIN" = "1" ]; then
+        # 使用 -g -n 20 生成带调用栈的报告
+        generate_perf_report "$perf_data_local" "${OUTPUT_DIR}/perf_report.txt" "1"
+        local report_size=$(wc -c < "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "0")
+        if [ -z "$report_size" ] || [ "$report_size" -lt 100 ]; then
+            log_warning "perf报告文件过小，使用非调用栈模式..."
+            generate_perf_report "$perf_data_local" "${OUTPUT_DIR}/perf_report.txt" "0"
+        else
+            log_success "perf报告已生成，大小: ${report_size} bytes"
+        fi
+    else
+        # 使用非调用栈模式
+        log_info "使用非调用栈模式生成perf报告..."
+        generate_perf_report "$perf_data_local" "${OUTPUT_DIR}/perf_report.txt" "0"
+    fi
+    
+    # 检查生成的报告
+    local report_size=$(wc -c < "${OUTPUT_DIR}/perf_report.txt" 2>/dev/null || echo "0")
+    if [ -z "$report_size" ] || [ "$report_size" -lt 100 ]; then
+        log_warning "perf报告生成失败，生成占位符..."
+        echo "# === perf报告生成失败 ===" > "${OUTPUT_DIR}/perf_report.txt"
+        echo "# " >> "${OUTPUT_DIR}/perf_report.txt"
+        echo "# perf.data 信息：" >> "${OUTPUT_DIR}/perf_report.txt"
+        sudo $perf_cmd report -i "$perf_data_local" --header-only 2>&1 | head -20 >> "${OUTPUT_DIR}/perf_report.txt" || true
+    fi
+    
+    # 生成调用栈数据（用于热点函数调用栈详情）
+    log_info "生成调用栈数据..."
+    if [ "$HAS_CALLCHAIN" = "1" ]; then
+        # 只有有调用链数据时才生成
+        if $perf_cmd script -i "$perf_data_local" 2>/dev/null > "${OUTPUT_DIR}/stack_counts.txt"; then
+            local stack_size=$(wc -c < "${OUTPUT_DIR}/stack_counts.txt" 2>/dev/null || echo "0")
+            if [ -n "$stack_size" ] && [ "$stack_size" -gt 100 ]; then
+                log_success "调用栈数据已生成，大小: ${stack_size} bytes"
+            else
+                log_warning "调用栈数据文件过小"
+                echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+            fi
+        else
+            # 尝试使用 sudo
+            if sudo $perf_cmd script -i "$perf_data_local" 2>/dev/null > "${OUTPUT_DIR}/stack_counts.txt"; then
+                local stack_size=$(wc -c < "${OUTPUT_DIR}/stack_counts.txt" 2>/dev/null || echo "0")
+                if [ -n "$stack_size" ] && [ "$stack_size" -gt 100 ]; then
+                    log_success "调用栈数据已生成(sudo模式)，大小: ${stack_size} bytes"
+                else
+                    log_warning "调用栈数据文件过小"
+                    echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+                fi
+            else
+                log_warning "调用栈数据生成失败"
+                echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+            fi
+        fi
+        
+        # 生成带调用栈的 perf report（用于热点函数调用链详情）
+        log_info "生成带调用栈的perf报告..."
+        if $perf_cmd report -i "$perf_data_local" --stdio -g 2>/dev/null > "${OUTPUT_DIR}/perf_report_with_stack.txt"; then
+            local report_stack_size=$(wc -c < "${OUTPUT_DIR}/perf_report_with_stack.txt" 2>/dev/null || echo "0")
+            if [ -n "$report_stack_size" ] && [ "$report_stack_size" -gt 100 ]; then
+                log_success "带调用栈的perf报告已生成，大小: ${report_stack_size} bytes"
+            else
+                log_warning "带调用栈的perf报告文件过小"
+                echo "N/A" > "${OUTPUT_DIR}/perf_report_with_stack.txt"
+            fi
+        else
+            # 尝试使用 sudo
+            if sudo $perf_cmd report -i "$perf_data_local" --stdio -g 2>/dev/null > "${OUTPUT_DIR}/perf_report_with_stack.txt"; then
+                local report_stack_size=$(wc -c < "${OUTPUT_DIR}/perf_report_with_stack.txt" 2>/dev/null || echo "0")
+                if [ -n "$report_stack_size" ] && [ "$report_stack_size" -gt 100 ]; then
+                    log_success "带调用栈的perf报告已生成(sudo模式)，大小: ${report_stack_size} bytes"
+                else
+                    log_warning "带调用栈的perf报告文件过小"
+                    echo "N/A" > "${OUTPUT_DIR}/perf_report_with_stack.txt"
+                fi
+            else
+                log_warning "带调用栈的perf报告生成失败"
+                echo "N/A" > "${OUTPUT_DIR}/perf_report_with_stack.txt"
+            fi
+        fi
+    else
+        # 无调用链数据时，创建空的占位符
+        echo "N/A" > "${OUTPUT_DIR}/stack_counts.txt"
+        echo "N/A" > "${OUTPUT_DIR}/perf_report_with_stack.txt"
+        log_info "跳过调用栈数据生成（perf.data无调用链）"
+    fi
+
+    # 生成热点函数调用栈详情（新的结构化格式）
+    generate_hot_functions_stacks "$perf_data_local" "${OUTPUT_DIR}/hot_functions_stacks.txt"
+
+    # 生成火焰图 SVG
+    log_info "生成火焰图..."
+
     # 生成火焰图
-    if sudo $perf_cmd script -f -i "$perf_data_local"  | "${local_flamegraph}/stackcollapse-perf.pl" | "${local_flamegraph}/flamegraph.pl"  > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
+    if $perf_cmd script -i "$perf_data_local" 2>/dev/null | "${local_flamegraph}/stackcollapse-perf.pl" 2>/dev/null | "${local_flamegraph}/flamegraph.pl" --bgcolor='#1e1e2e' > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
         local svg_size=$(wc -c < "${OUTPUT_DIR}/perf_flamegraph.svg" 2>/dev/null || echo "0")
         if [ -n "$svg_size" ] && [ "$svg_size" -gt 1000 ]; then
             log_success "火焰图已生成，大小: ${svg_size} bytes"
@@ -791,13 +1030,14 @@ collect_flamegraph_data() {
             echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
         fi
     else
-        log_warning "火焰图生成失败，尝试使用备用参数..."
-        # 尝试不使用 -f 参数
-        if $perf_cmd script -i "$perf_data_local" 2>/dev/null | "${local_flamegraph}/stackcollapse-perf.pl" 2>/dev/null | "${local_flamegraph}/flamegraph.pl" --bgcolor='#1a1a2e' > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
+        log_warning "火焰图生成失败，尝试使用sudo..."
+        # 尝试使用sudo
+        if sudo $perf_cmd script -i "$perf_data_local" 2>/dev/null | "${local_flamegraph}/stackcollapse-perf.pl" 2>/dev/null | "${local_flamegraph}/flamegraph.pl" --bgcolor='#1e1e2e' > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
             local svg_size=$(wc -c < "${OUTPUT_DIR}/perf_flamegraph.svg" 2>/dev/null || echo "0")
             if [ -n "$svg_size" ] && [ "$svg_size" -gt 1000 ]; then
-                log_success "火焰图已生成(备用模式)，大小: ${svg_size} bytes"
+                log_success "火焰图已生成(sudo模式)，大小: ${svg_size} bytes"
             else
+                log_warning "火焰图文件过小"
                 echo "N/A" > "${OUTPUT_DIR}/perf_flamegraph.svg"
             fi
         else

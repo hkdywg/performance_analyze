@@ -243,6 +243,113 @@ HTML_HEADER = """<!DOCTYPE html>
             margin: 15px 0;
         }}
 
+        /* 热点函数表格样式 */
+        .hot-functions-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-size: 14px;
+        }}
+
+        .hot-functions-table th {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }}
+
+        .hot-functions-table td {{
+            padding: 10px 12px;
+            border-bottom: 1px solid #eee;
+        }}
+
+        .hot-functions-table tr:hover {{
+            background: #f8f9fa;
+        }}
+
+        .hot-functions-table tr.high-usage {{
+            background: #fff3cd;
+        }}
+
+        .hot-functions-table tr.high-usage:hover {{
+            background: #ffeeba;
+        }}
+
+        .category-tag {{
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }}
+
+        .category-tag.图形 {{
+            background: #e3f2fd;
+            color: #1565c0;
+        }}
+
+        .category-tag.通用 {{
+            background: #f3e5f5;
+            color: #7b1fa2;
+        }}
+
+        .stack-link {{
+            color: #667eea;
+            text-decoration: none;
+            font-size: 12px;
+        }}
+
+        .stack-link:hover {{
+            text-decoration: underline;
+        }}
+
+        /* SVG火焰图容器 */
+        .svg-flamegraph-container {{
+            margin: 20px 0;
+            padding: 15px;
+            background: #fafafa;
+            border-radius: 8px;
+            border: 1px solid #eee;
+        }}
+
+        .svg-wrapper {{
+            overflow-x: auto;
+            margin: 10px 0;
+        }}
+
+        .svg-wrapper svg {{
+            max-width: 100%;
+            height: auto;
+        }}
+
+        .download-link {{
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-size: 14px;
+        }}
+
+        .download-link:hover {{
+            background: #5568d3;
+        }}
+
+        .back-link {{
+            font-size: 12px;
+            color: rgba(255,255,255,0.8);
+            text-decoration: none;
+            margin-left: 15px;
+        }}
+
+        .back-link:hover {{
+            color: white;
+            text-decoration: underline;
+        }}
+
         .stack-function {{
             margin: 10px 0;
             border: 1px solid #ddd;
@@ -460,21 +567,37 @@ class PerformanceReportGenerator:
     def load_data(self) -> bool:
         """加载数据文件"""
         print(f"从 {self.data_dir} 加载数据...")
-        
+
         # 查找JSON汇总文件
         json_files = list(self.data_dir.glob("remote_data_*.json"))
         if json_files:
             with open(json_files[0], 'r', encoding='utf-8') as f:
                 self.data = json.load(f)
-            
-            # 也加载 CSV 文件（补充数据）
-            self._load_csv_files()
+
+            # 重新加载所有数据文件（优先使用最新文件内容覆盖JSON中的旧数据）
+            self._load_all_data_files()
         else:
             # 加载所有txt文件
             self._load_text_files()
-        
+
         return bool(self.data)
-    
+
+    def _load_all_data_files(self):
+        """重新加载所有数据文件以获取最新内容"""
+        # 加载所有 txt 文件（perf_report.txt, stack_counts.txt 等）
+        for txt_file in self.data_dir.glob("*.txt"):
+            try:
+                with open(txt_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    self.data["files"][txt_file.name] = f.read()
+            except Exception as e:
+                print(f"读取 {txt_file.name} 失败: {e}")
+
+        # 加载 CSV 文件
+        self._load_csv_files()
+
+        # 加载 SVG 文件
+        self._load_svg_files()
+
     def _load_csv_files(self):
         """加载 CSV 文件"""
         for csv_file in self.data_dir.glob("*.csv"):
@@ -483,17 +606,29 @@ class PerformanceReportGenerator:
                     self.data["files"][csv_file.name] = f.read()
             except Exception as e:
                 print(f"读取 {csv_file.name} 失败: {e}")
-    
+
+    def _load_svg_files(self):
+        """加载 SVG 文件"""
+        for svg_file in self.data_dir.glob("*.svg"):
+            try:
+                with open(svg_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    self.data["files"][svg_file.name] = f.read()
+            except Exception as e:
+                print(f"读取 {svg_file.name} 失败: {e}")
+
     def _load_text_files(self):
         """从文本文件加载数据"""
         self.data = {"files": {}}
-        
-        for txt_file in self.data_dir.glob("*.txt"):
-            try:
-                with open(txt_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    self.data["files"][txt_file.name] = f.read()
-            except Exception as e:
-                print(f"读取 {txt_file.name} 失败: {e}")
+
+        # 加载所有支持的文件类型
+        file_patterns = ["*.txt", "*.csv", "*.svg", "*.json"]
+        for pattern in file_patterns:
+            for data_file in self.data_dir.glob(pattern):
+                try:
+                    with open(data_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        self.data["files"][data_file.name] = f.read()
+                except Exception as e:
+                    print(f"读取 {data_file.name} 失败: {e}")
     
     def analyze_data(self):
         """分析数据并识别问题"""
@@ -538,12 +673,23 @@ class PerformanceReportGenerator:
         stack_counts = self.data.get("files", {}).get("stack_counts.txt", "")
         function_counts = self.data.get("files", {}).get("function_counts.txt", "")
         syscall_counts = self.data.get("files", {}).get("syscall_counts.txt", "")
+        hot_functions_stacks = self.data.get("files", {}).get("hot_functions_stacks.txt", "")
 
         # 分析perf报告
         if perf_report and perf_report != "N/A" and "采集失败" not in perf_report:
             hot_functions = self._extract_hot_functions(perf_report)
             if hot_functions:
                 self._analyze_hot_functions(hot_functions)
+
+        # 从新的结构化文件解析热点函数和调用栈
+        if hot_functions_stacks and hot_functions_stacks != "N/A":
+            parsed = self._parse_hot_functions_stacks(hot_functions_stacks)
+            if parsed:
+                # 更新热点函数列表（如果解析成功）
+                if parsed.get("status") == "success":
+                    print(f"  解析到 {len(parsed.get('functions', []))} 个热点函数")
+                elif parsed.get("status") == "no_callchain":
+                    print("  perf.data无调用链数据")
 
         # 分析函数调用频率
         if function_counts and function_counts != "N/A":
@@ -553,17 +699,203 @@ class PerformanceReportGenerator:
         if syscall_counts and syscall_counts != "N/A" and "N/A" not in syscall_counts:
             self._analyze_syscalls(syscall_counts)
 
+    def _parse_hot_functions_stacks(self, content: str) -> Dict:
+        """解析热点函数调用栈文件"""
+        result = {
+            "status": "unknown",
+            "functions": [],
+            "no_callchain_message": ""
+        }
+        
+        lines = content.split('\n')
+        if not lines:
+            return result
+        
+        # 检查状态行
+        for line in lines:
+            if line.startswith("# 状态:"):
+                status = line.split("状态:")[1].strip()
+                result["status"] = status
+                if status == "无调用链数据":
+                    result["no_callchain_message"] = self._extract_no_callchain_message(content)
+                return result
+        
+        # 解析函数和调用栈
+        current_func = None
+        current_stack = []
+        
+        for line in lines:
+            if line.startswith("#") or not line.strip():
+                continue
+            
+            if line.startswith("FUNC:"):
+                # 保存前一个函数
+                if current_func:
+                    result["functions"].append({
+                        "name": current_func["name"],
+                        "pct": current_func["pct"],
+                        "stack": current_stack[:]
+                    })
+                
+                # 解析新函数
+                # 格式: "FUNC: 0xaddr PCT: xx.xx%"
+                match = re.match(r'FUNC:\s*(\S+)\s+PCT:\s*([0-9.]+)%', line)
+                if match:
+                    current_func = {
+                        "name": match.group(1),
+                        "pct": float(match.group(2))
+                    }
+                    current_stack = []
+            
+            elif line.startswith("  STACK["):
+                # 解析调用栈
+                # 格式: "  STACK[2]: module:addr"
+                match = re.match(r'\s+STACK\[(\d+)\]:\s*(\S+)', line)
+                if match:
+                    depth = int(match.group(1))
+                    frame = match.group(2)
+                    # 只保留新深度的调用
+                    if depth <= len(current_stack) + 1:
+                        current_stack.append(frame)
+        
+        # 保存最后一个函数
+        if current_func:
+            result["functions"].append({
+                "name": current_func["name"],
+                "pct": current_func["pct"],
+                "stack": current_stack[:]
+            })
+        
+        return result
+
+    def _extract_no_callchain_message(self, content: str) -> str:
+        """提取无调用链时的提示信息"""
+        lines = content.split('\n')
+        messages = []
+        for line in lines:
+            if line.startswith("#") and "解决方案" not in line and "perf record" not in line:
+                msg = line.lstrip("# ").strip()
+                if msg:
+                    messages.append(msg)
+        return "\n".join(messages)
+
+    def _extract_hot_functions_from_report(self, report_text: str) -> Tuple[List, Dict, bool]:
+        """从 perf report 文本中提取热点函数和调用栈
+        返回: (hot_functions列表, 函数数据字典, 是否有调用链)
+        """
+        hot_functions = []
+        hot_functions_data = {}
+        has_callchain = False
+        seen = set()
+
+        lines = report_text.split('\n')
+        current_func = None
+        current_pct = 0.0
+        current_stack = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+
+            # 检测新的热点函数行（perf report 标准格式）
+            # 例如: "    89.29%     0.00%  kanzi    kanzi                [.] 0x0000000000435bb0"
+            match = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
+            if match:
+                # 保存前一个函数
+                if current_func:
+                    hot_functions.append((current_func, current_pct))
+                    hot_functions_data[current_func] = {"pct": current_pct, "stack": current_stack[:]}
+
+                current_pct = float(match.group(1))
+                module = match.group(2).strip()
+                addr = match.group(3).strip()
+
+                # 提取函数名
+                if module == 'kanzi' and addr.startswith('0x'):
+                    current_func = addr  # 使用地址作为函数名
+                else:
+                    current_func = module
+
+                current_stack = []
+                has_callchain = False
+                continue
+
+            # 检测带调用栈的 perf report 格式（树形结构）
+            # 例如: "            |"
+            #       "            ---0x435bb0"
+            if '|' in line or '---' in line:
+                has_callchain = True
+                # 提取地址
+                addr_match = re.search(r'0x([0-9a-f]+)', line)
+                if addr_match:
+                    addr = addr_match.group(1)
+                    if addr.startswith('ffff'):
+                        current_stack.append(f"kernel:0x{addr[-8:]}")
+                    else:
+                        current_stack.append(f"app:0x{addr[-8:]}")
+
+        # 保存最后一个函数
+        if current_func:
+            hot_functions.append((current_func, current_pct))
+            hot_functions_data[current_func] = {"pct": current_pct, "stack": current_stack[:]}
+
+        return hot_functions, hot_functions_data, has_callchain
+
     def _extract_hot_functions(self, perf_text: str) -> List[Tuple[str, float]]:
         """从perf报告中提取热点函数"""
         hot_funcs = []
         lines = perf_text.split('\n')
+        seen = set()  # 用于去重
+        
         for line in lines:
-            # 匹配 perf report 格式: "  xx.xx%  func_name"
-            match = re.match(r'\s*(\d+\.?\d*)\s*%\s+(.+)', line)
+            # 跳过空行和注释行
+            if not line.strip() or line.strip().startswith('#'):
+                continue
+            
+            # perf report 格式: "[空白][Children%][空白][Self%][空白][Command][空白][Shared Object][空白][Symbol]"
+            # 例如: "    89.49%     0.00%  kanzi    kanzi                [.] 0x000000000041c55c"
+            # 或: "    29.07%     0.00%  kanzi    [kernel.kallsyms]    [k] 0xffff800010011d98"
+            match = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
             if match:
                 pct = float(match.group(1))
-                func_name = match.group(2).strip()
-                hot_funcs.append((func_name, pct))
+                module = match.group(2).strip()
+                addr = match.group(3).strip()
+                
+                # 优先使用模块名，清理方括号
+                func_name = module.strip('[]')
+                
+                # 对于 kanzi 应用的地址，保留地址前缀作为标识
+                if func_name == 'kanzi' and addr.startswith('0x'):
+                    # 64位地址，保留完整地址标识
+                    func_name = f"0x{addr[2:18]}"
+                
+                if func_name and func_name != '[unknown]':
+                    # 去重
+                    key = (func_name, pct)
+                    if key not in seen:
+                        seen.add(key)
+                        hot_funcs.append((func_name, pct))
+                    continue
+                
+            # 处理 kernel 符号格式: [k] 0xaddr
+            match2 = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[k\]\s+(0x\S+)', line)
+            if match2:
+                pct = float(match2.group(1))
+                module = match2.group(2).strip()
+                addr = match2.group(3).strip()
+                func_name = module.strip('[]')
+                
+                # 保留内核地址前缀
+                if func_name == 'kernel.kallsyms':
+                    func_name = f"[k]0x{addr[2:18]}"
+                
+                if func_name:
+                    key = (func_name, pct)
+                    if key not in seen:
+                        seen.add(key)
+                        hot_funcs.append((func_name, pct))
+        
         return hot_funcs[:20]  # 返回前20个热点
 
     def _analyze_hot_functions(self, hot_funcs: List[Tuple[str, float]]):
@@ -1104,6 +1436,61 @@ class PerformanceReportGenerator:
         }
     });
     </script>
+    <script>
+    // 热点函数调用栈折叠功能
+    function toggleStack(id) {
+        var content = document.getElementById(id);
+        if (content) {
+            if (content.style.display === 'none' || content.style.display === '') {
+                content.style.display = 'block';
+                // 更新header中的toggle图标
+                var header = content.previousElementSibling;
+                if (header && header.classList.contains('stack-header')) {
+                    var toggle = header.querySelector('.stack-toggle');
+                    if (toggle) toggle.textContent = '▲';
+                }
+            } else {
+                content.style.display = 'none';
+                var header = content.previousElementSibling;
+                if (header && header.classList.contains('stack-header')) {
+                    var toggle = header.querySelector('.stack-toggle');
+                    if (toggle) toggle.textContent = '▼';
+                }
+            }
+        }
+    }
+
+    // 页面加载完成后隐藏所有调用栈内容
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('.stack-content').forEach(function(el) {
+            el.style.display = 'none';
+        });
+    });
+
+    // 处理URL中的锚点跳转
+    if (window.location.hash) {
+        var hash = window.location.hash.substring(1);
+        var targetEl = document.getElementById(hash);
+        if (targetEl) {
+            setTimeout(function() {
+                targetEl.scrollIntoView({ behavior: 'smooth' });
+                // 如果是stack-content，自动展开
+                if (targetEl.classList.contains('stack-content')) {
+                    targetEl.style.display = 'block';
+                }
+                // 如果是stack-header，展开其后的content
+                if (targetEl.classList.contains('stack-header')) {
+                    var content = targetEl.nextElementSibling;
+                    if (content && content.classList.contains('stack-content')) {
+                        content.style.display = 'block';
+                        var toggle = targetEl.querySelector('.stack-toggle');
+                        if (toggle) toggle.textContent = '▲';
+                    }
+                }
+            }, 300);
+        }
+    }
+    </script>
 '''
         
         # 页脚
@@ -1140,7 +1527,7 @@ class PerformanceReportGenerator:
                 <li><a href="#compositor">Compositor状态</a></li>
                 <li><a href="#application">应用性能</a></li>
                 <li><a href="#issues">问题诊断</a></li>
-                <li><a href="#flamegraph">热点分析</a></li>
+                <li><a href="#flamegraph">火焰图</a></li>
                 <li><a href="#graphics">图形优化</a></li>
                 <li><a href="#suggestions">优化建议</a></li>
             </ul>
@@ -1646,35 +2033,80 @@ class PerformanceReportGenerator:
     def _generate_flamegraph_section(self) -> str:
         """生成火焰图分析章节"""
         perf_report = self.data.get("files", {}).get("perf_report.txt", "N/A")
+        perf_flamegraph_svg = self.data.get("files", {}).get("perf_flamegraph.svg", "")
         stack_counts = self.data.get("files", {}).get("stack_counts.txt", "N/A")
         syscall_counts = self.data.get("files", {}).get("syscall_counts.txt", "N/A")
         function_counts = self.data.get("files", {}).get("function_counts.txt", "N/A")
 
-        # 解析热点函数
+        # 检查SVG内容是否存在且有效（直接从内存中的数据检查）
+        svg_content = perf_flamegraph_svg if perf_flamegraph_svg else ""
+        svg_display = "none"
+        if svg_content and len(svg_content) > 100:
+            svg_display = "block"
+
+        # 解析热点函数 - 优先使用 perf_report.txt，如果太短则使用 perf_report_with_stack.txt
         hot_functions = []
-        if perf_report and perf_report != "N/A" and "采集失败" not in perf_report:
-            for line in perf_report.split('\n')[:30]:
-                match = re.match(r'\s*(\d+\.?\d*)\s*%\s+(.+)', line)
+        seen = set()  # 用于去重
+        perf_report_with_stack = self.data.get("files", {}).get("perf_report_with_stack.txt", "")
+
+        # 确定使用哪个报告文件
+        source_report = perf_report
+        # 如果 perf_report 是错误信息或太短，使用 perf_report_with_stack
+        if not source_report or source_report == "N/A" or len(source_report.strip()) < 100 or "not owned" in source_report or "采集失败" in source_report:
+            source_report = perf_report_with_stack
+
+        if source_report and source_report != "N/A" and "采集失败" not in source_report:
+            for line in source_report.split('\n'):
+                if not line.strip() or line.strip().startswith('#'):
+                    continue
+                
+                # perf report 格式: "[空白][Children%][空白][Self%][空白][Command][空白][Shared Object][空白][Symbol]"
+                # 例如: "    89.49%     0.00%  kanzi    kanzi                [.] 0x000000000041c55c"
+                match = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
                 if match:
                     pct = float(match.group(1))
-                    func_full = match.group(2).strip()
-                    # perf report格式: "symbol [module] [k] funcname" 或 "swapper [kernel] [k] funcname"
-                    # 只提取最后的函数名
-                    parts = func_full.split()
-                    if parts:
-                        # 尝试从后往前找第一个有效的函数名
-                        func = parts[-1]
-                        # 去掉 [k] 前缀（如果还在的话）
-                        func = func.lstrip('[]')
-                        hot_functions.append((func, pct))
+                    module = match.group(2).strip()
+                    addr = match.group(3).strip()
+                    
+                    func = module.strip('[]')
+                    if func == 'kanzi' and addr.startswith('0x'):
+                        func = f"0x{addr[2:18]}"
+                    
+                    if func and func != '[unknown]':
+                        key = (func, pct)
+                        if key not in seen:
+                            seen.add(key)
+                            hot_functions.append((func, pct))
+                        continue
+                
+                # 处理 kernel 符号格式: [k] 0xaddr
+                match2 = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[k\]\s+(0x\S+)', line)
+                if match2:
+                    pct = float(match2.group(1))
+                    module = match2.group(2).strip()
+                    addr = match2.group(3).strip()
+                    func = module.strip('[]')
+                    
+                    if func == 'kernel.kallsyms':
+                        func = f"[k]0x{addr[2:18]}"
+                    
+                    if func:
+                        key = (func, pct)
+                        if key not in seen:
+                            seen.add(key)
+                            hot_functions.append((func, pct))
 
         # 分类热点函数
         graphics_funcs = []
         general_funcs = []
+        graphics_func_names = set()
         for func, pct in hot_functions:
             func_lower = func.lower()
-            if any(kw in func_lower for kw in ['gl', 'egl', 'drm', 'gpu', 'shader', 'texture', 'render', ' Mesa', 'intel', 'i915']):
+            # 图形学相关函数
+            if any(kw in func_lower for kw in ['gl', 'egl', 'drm', 'gpu', 'shader', 'texture', 'render', ' Mesa', 'intel', 'i915', 'libgles', 'libsrv', 'pvrsrv']):
                 graphics_funcs.append((func, pct))
+                graphics_func_names.add(func)
+            # 保留所有函数，包括地址格式的（用于显示热点）
             else:
                 general_funcs.append((func, pct))
 
@@ -1697,17 +2129,74 @@ class PerformanceReportGenerator:
             if func_lines:
                 func_count_html = "<h3>图形函数调用频率</h3><pre>" + "\n".join(self._escape_html(l) for l in func_lines) + "</pre>"
 
+        # 热点函数表格
         hot_funcs_html = ""
+        call_stack_note = ""
+        
+        # 检查是否有调用链数据
+        has_callchain = stack_counts and stack_counts != "N/A" and "no callchain" not in stack_counts.lower() and "N/A" not in stack_counts
+        # 如果 stack_counts 没有调用链，但 perf_report_with_stack.txt 有内容，认为有调用链
+        if not has_callchain and perf_report_with_stack and len(perf_report_with_stack) > 1000:
+            has_callchain = True
+        # perf_report不为空且不是只有占位符
+        perf_report_stripped = perf_report.strip() if perf_report else ""
+        has_perf_report = perf_report and perf_report != "N/A" and len(perf_report_stripped) > 50
+        # 检查perf报告是否只是错误提示
+        is_placeholder_report = perf_report and ("perf报告生成失败" in perf_report or "not owned" in perf_report)
+        
         if hot_functions:
-            hot_funcs_html = "<table><tr><th>排名</th><th>函数</th><th>CPU占比</th><th>类别</th></tr>"
+            hot_funcs_html = """
+            <table class="hot-functions-table">
+                <tr><th>排名</th><th>函数名</th><th>CPU占比</th><th>类别</th><th>操作</th></tr>"""
             for i, (func, pct) in enumerate(hot_functions[:15]):
-                category = "图形" if func in [f[0] for f in graphics_funcs] else "通用"
-                hot_funcs_html += f"<tr><td>{i+1}</td><td><code>{self._escape_html(func)}</code></td><td>{pct:.2f}%</td><td>{category}</td></tr>"
+                category = "图形" if func in graphics_func_names else "通用"
+                func_id = re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
+                # 高亮超过5%的热点
+                highlight_class = "high-usage" if pct >= 5 else ""
+                
+                # 调用栈链接（只有有调用链数据时才显示）
+                if has_callchain:
+                    action_link = f'<a href="#stack_{func_id}" class="stack-link" onclick="toggleStack(\'stack_{func_id}_content\'); return false;">查看调用栈</a>'
+                else:
+                    action_link = '<span class="no-data">无调用栈数据</span>'
+                
+                hot_funcs_html += f"""<tr class="{highlight_class}">
+                    <td>{i+1}</td>
+                    <td><code class="func-name">{self._escape_html(func)}</code></td>
+                    <td>{pct:.2f}%</td>
+                    <td><span class="category-tag {category.lower()}">{category}</span></td>
+                    <td>{action_link}</td>
+                </tr>"""
             hot_funcs_html += "</table>"
+            
+            if not has_callchain:
+                call_stack_note = '''
+                <div class="issue warning" style="margin-top: 15px;">
+                    <h4>注意：调用栈数据不可用</h4>
+                    <p>当前perf数据采集时未使用"-g"参数，因此没有调用链信息。</p>
+                    <p>如需查看详细调用栈，请在远程设备上使用以下命令重新采集perf数据：</p>
+                    <div class="code">perf record -F 99 -p &lt;PID&gt; -a -g -o /tmp/perf.data -- sleep 10</div>
+                </div>'''
+        else:
+            hot_funcs_html = '<p class="no-data">暂无热点函数数据</p>'
+            # 如果有 perf 报告但没有热点函数，显示 warning
+            if is_placeholder_report or (has_perf_report and len(hot_functions) == 0):
+                call_stack_note = '''
+                <div class="issue warning" style="margin-top: 15px;">
+                    <h4>注意：未能解析出热点函数</h4>
+                    <p>perf报告存在但未能解析出热点函数。可能原因：</p>
+                    <ul style="margin: 10px 0 10px 20px;">
+                        <li>perf.data采集时未使用"-g"参数，没有调用链信息</li>
+                        <li>sudo权限不足，无法读取perf.data</li>
+                        <li>perf工具版本不匹配</li>
+                    </ul>
+                    <p style="margin-top: 10px;"><strong>解决方案：</strong>在远程设备上使用以下命令重新采集perf数据：</p>
+                    <div class="code">perf record -F 99 -p &lt;PID&gt; -a -g -o /tmp/perf.data -- sleep 10</div>
+                </div>'''
 
         return f"""
         <section id="flamegraph" class="card">
-            <h2>6. 性能热点分析（火焰图数据）</h2>
+            <h2>6. 火焰图与热点分析</h2>
 
             <div class="grid">
                 <div class="stat-box">
@@ -1719,35 +2208,48 @@ class PerformanceReportGenerator:
                     <div class="label">图形相关热点</div>
                 </div>
                 <div class="stat-box">
-                    <div class="value">{f"{hot_functions[0][1]:.1f}" if hot_functions else "0.0"}%</div>
+                    <div class="value">{f"{hot_functions[0][1]:.1f}%" if hot_functions else "0.0%"}</div>
                     <div class="label">最高热点占比</div>
                 </div>
             </div>
 
+            <!-- SVG火焰图显示 -->
+            <div class="svg-flamegraph-container" style="display: {svg_display}; margin: 20px 0;">
+                <h3>火焰图 (SVG)</h3>
+                <p class="tip">点击火焰图中的函数可以查看详细信息。火焰图颜色说明: 红色=渲染, 橙色=计算, 黄色=系统调用, 绿色=应用代码, 蓝色=库函数。</p>
+                <div class="svg-wrapper">
+                    {svg_content}
+                </div>
+                <a href="perf_flamegraph.svg" download="perf_flamegraph.svg" class="download-link">下载SVG火焰图</a>
+            </div>
+            {'<p class="no-data">SVG火焰图暂不可用（需在本地执行perf生成）</p>' if svg_display == 'none' else ''}
+
             <h3>热点函数列表</h3>
-            {hot_funcs_html if hot_funcs_html else '<p>无热点数据</p>'}
+            <p class="tip">高亮显示CPU占比>=5%的热点函数，点击"查看调用栈"可跳转到该函数的详细调用链。</p>
+            {hot_funcs_html}
+            {call_stack_note}
 
             {hot_stacks_html}
 
             <h3>perf采样报告</h3>
-            <pre>{self._escape_html(perf_report[:3000]) if perf_report != 'N/A' else 'perf数据不可用'}</pre>
+            <pre>{self._escape_html(perf_report[:5000]) if perf_report != 'N/A' else 'perf数据不可用'}</pre>
 
             {syscall_html}
             {func_count_html}
 
             <div class="suggestion">
                 <h4>热点分析方法</h4>
-                <p>1. 查看上方热点函数列表，优先关注占比>5%的函数</p>
+                <p>1. 查看上方热点函数列表，优先关注占比>5%的函数（高亮行）</p>
                 <p>2. 图形相关热点（gl*/egl*/drm*）建议检查着色器复杂度、纹理格式、绘制调用次数</p>
                 <p>3. 通用热点需评估是否有算法优化空间或缓存可能</p>
-                <p>4. 如需更详细的火焰图，可将 stack_counts.txt 导入 FlameGraph 工具生成 SVG</p>
+                <p>4. 查看上方火焰图，点击热点函数可放大查看调用栈详情</p>
             </div>
         </section>
         """
 
     def _generate_hot_function_stacks(self, stack_data: str, hot_functions: List[Tuple[str, float]]) -> str:
         """为热点函数生成调用栈详情"""
-        html = "<h3>热点函数调用栈详情</h3>"
+        html = "<h3 id='hot-stacks'>热点函数调用栈详情</h3>"
         html += "<div class='stack-details'>"
 
         for func, pct in hot_functions:
@@ -1757,32 +2259,34 @@ class PerformanceReportGenerator:
             # 提取该函数相关的调用栈
             func_stacks = self._extract_call_stacks(stack_data, func)
 
+            # 清理函数名用于HTML id（加上stack_前缀避免与锚点冲突）
+            func_id = "stack_" + re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
+
             if func_stacks:
-                # 清理函数名用于HTML id
-                func_id = re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
                 html += f"""
-                <div class="stack-function">
-                    <div class="stack-header" onclick="toggleStack('{func_id}')">
+                <div class="stack-function" id="{func_id}">
+                    <div class="stack-header" onclick="toggleStack('{func_id}_content')">
                         <span class="stack-name"><code>{self._escape_html(func)}</code></span>
                         <span class="stack-pct">{pct:.2f}%</span>
                         <span class="stack-toggle">▼</span>
+                        <a href="#{func_id}_link" class="back-link">↑返回列表</a>
                     </div>
-                    <div class="stack-content" id="{func_id}">
+                    <div class="stack-content" id="{func_id}_content">
                         <pre>{func_stacks}</pre>
                     </div>
                 </div>
                 """
             else:
                 # 即使没有调用栈也显示函数名
-                func_id = re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
                 html += f"""
-                <div class="stack-function">
-                    <div class="stack-header" onclick="toggleStack('{func_id}')">
+                <div class="stack-function" id="{func_id}">
+                    <div class="stack-header" onclick="toggleStack('{func_id}_content')">
                         <span class="stack-name"><code>{self._escape_html(func)}</code></span>
                         <span class="stack-pct">{pct:.2f}%</span>
                         <span class="stack-toggle">▼</span>
+                        <a href="#{func_id}_link" class="back-link">↑返回列表</a>
                     </div>
-                    <div class="stack-content" id="{func_id}">
+                    <div class="stack-content" id="{func_id}_content">
                         <pre>(无详细调用栈数据)</pre>
                     </div>
                 </div>
@@ -1790,92 +2294,239 @@ class PerformanceReportGenerator:
 
         html += "</div>"
 
-        # 添加折叠/展开的JavaScript
-        if "<script>" not in html:
-            html += """
-            <script>
-            function toggleStack(id) {
-                var content = document.getElementById(id);
-                if (content.style.display === 'none') {
-                    content.style.display = 'block';
-                } else {
-                    content.style.display = 'none';
-                }
-            }
-            document.querySelectorAll('.stack-content').forEach(function(el) {
-                el.style.display = 'none';
-            });
-            </script>
-            """
+        return html
 
+    def _generate_hot_function_stacks_from_data(self, hot_functions_data: Dict) -> str:
+        """从解析后的热点函数数据生成调用栈详情HTML"""
+        html = "<h3 id='hot-stacks'>热点函数调用栈详情</h3>"
+        html += "<div class='stack-details'>"
+
+        for func_name, data in hot_functions_data.items():
+            pct = data.get("pct", 0)
+            stack = data.get("stack", [])
+
+            if pct < 0.5:  # 只显示占比>0.5%的函数
+                continue
+
+            func_id = "stack_" + re.sub(r'[^a-zA-Z0-9]', '_', func_name[:30])
+
+            # 生成调用栈HTML
+            if stack:
+                stack_html = ""
+                for i, frame in enumerate(stack[:15]):  # 最多显示15层
+                    if i == 0:
+                        stack_html += f'<span class="func-entry">└─ {self._escape_html(frame)} (root)</span>\n'
+                    else:
+                        indent = '&nbsp;&nbsp;&nbsp;' * (i - 1)
+                        stack_html += f'{indent}└─ {self._escape_html(frame)}\n'
+
+                html += f"""
+                <div class="stack-function" id="{func_id}">
+                    <div class="stack-header" onclick="toggleStack('{func_id}_content')">
+                        <span class="stack-name"><code>{self._escape_html(func_name)}</code></span>
+                        <span class="stack-pct">{pct:.2f}%</span>
+                        <span class="stack-toggle">▼</span>
+                        <a href="#stack_{func_id}_link" class="back-link">↑返回列表</a>
+                    </div>
+                    <div class="stack-content" id="{func_id}_content">
+                        <pre>{stack_html}</pre>
+                    </div>
+                </div>
+                """
+
+        html += "</div>"
         return html
 
     def _extract_call_stacks(self, stack_data: str, func_name: str) -> str:
-        """从栈数据中提取特定函数的调用栈（只提取函数名，反向显示）"""
+        """从栈数据中提取特定函数的调用栈"""
         lines = stack_data.split('\n')
+        
+        # 首先尝试从 perf report (带调用栈格式) 中提取
+        perf_report_data = self.data.get("files", {}).get("perf_report_with_stack.txt", "")
+        if perf_report_data:
+            result = self._extract_from_perf_report(perf_report_data, func_name)
+            if result:
+                return result
+        
+        # 回退到 stack_counts.txt
         stack_frames = []
-        current_event_lines = []
         found_target = False
-        completed = False
-
+        current_stack = []
+        
+        # 提取要搜索的地址有意义部分（如果func_name是地址）
+        search_addr_part = None
+        if func_name.startswith('0x') or func_name.startswith('[k]0x'):
+            addr_part = func_name.replace('[k]', '')
+            if addr_part.startswith('0x') and len(addr_part) >= 10:
+                full_addr = addr_part[2:]
+                search_addr_part = full_addr[4:12] if len(full_addr) > 12 else full_addr.lstrip('0')
+                if not search_addr_part:
+                    search_addr_part = full_addr[-8:]
+        
         for line in lines:
             stripped = line.strip()
             
-            # perf script/record 输出格式: "PID CPU [ID] TIME: EVENT" 或 "swapper 0 [000] TIME: EVENT"
+            # perf script 输出格式: "comm  pid  [cpu]  time: event"
+            # 检测新事件的开始
             if re.match(r'^\S+\s+\d+\s+\[\d+\]\s+\d+\.\d+:', stripped):
-                # 处理前一个事件
-                if found_target and current_event_lines:
-                    stack_frames.extend(current_event_lines)
-                    completed = True
-                    break
-                if completed:
-                    break
-                # 开始新事件
-                current_event_lines = []
+                if found_target and current_stack:
+                    stack_frames.extend(current_stack)
+                current_stack = []
                 found_target = False
                 continue
-
-            # 检查是否包含目标函数
-            if func_name in stripped:
+            
+            # 检查是否包含目标函数或地址
+            if func_name.lower() in stripped.lower():
                 found_target = True
-
-            # 收集栈帧（以 \t 开头或足够缩进的行）
-            if '\t' in line or line.startswith('    '):
-                frame_text = stripped.lstrip('\t ')
-                parts = frame_text.split()
-                if len(parts) >= 2:
-                    symbol_part = parts[1]
-                    func = symbol_part.split('+')[0].split('(')[0]
-                    if func and len(func) > 2 and not func.startswith('0x'):
-                        current_event_lines.append(func)
-
-        # 处理最后一个事件
-        if found_target and current_event_lines and not completed:
-            stack_frames.extend(current_event_lines)
-
+            elif search_addr_part:
+                addr_match = re.search(r'\t+([0-9a-f]+)\s+\[unknown\]', line)
+                if addr_match:
+                    addr_in_line = addr_match.group(1)
+                    addr_clean = addr_in_line.lstrip('0')
+                    if search_addr_part.lstrip('0') in addr_clean or addr_clean in search_addr_part.lstrip('0'):
+                        found_target = True
+            
+            # 解析栈帧行
+            if stripped and line.startswith('\t'):
+                frame_text = stripped
+                match = re.match(r'([0-9a-f]+)\s+\[unknown\]\s+\(([^)]+)\)', frame_text)
+                if match:
+                    addr = match.group(1)
+                    module = match.group(2)
+                    
+                    if 'libc' in module:
+                        module_name = 'libc'
+                    elif 'libGLES' in module or 'libGL' in module:
+                        module_name = 'libGLES'
+                    elif 'libsrv' in module:
+                        module_name = 'libsrv_um'
+                    elif 'pvrsrv' in module:
+                        module_name = 'pvrsrvkm'
+                    elif 'libpthread' in module:
+                        module_name = 'libpthread'
+                    elif 'kanzi' in module or module.startswith('/HUD'):
+                        module_name = 'kanzi'
+                    elif 'kernel' in module or module.startswith('['):
+                        module_name = 'kernel'
+                    else:
+                        import os
+                        module_name = os.path.basename(module)
+                    
+                    current_stack.append(f"{module_name}:{addr[-8:]}")
+        
+        if found_target and current_stack:
+            stack_frames.extend(current_stack)
+        
         if not stack_frames:
             return ""
-
-        # 反转顺序（自底向上变为自顶向下），并去重
+        
         stack_frames.reverse()
         deduped = []
-        prev = None
+        seen_frames = set()
         for f in stack_frames[:20]:
-            if f != prev:
+            if f not in seen_frames:
+                seen_frames.add(f)
                 deduped.append(f)
-                prev = f
-
-        # 添加层级调用关系
+        
         result = []
-        for i, func in enumerate(deduped):
+        for i, frame in enumerate(deduped):
             if i == 0:
-                # 入口函数直接显示函数名
-                result.append(f'<span class="func-entry">{func}</span>')
+                result.append(f'<span class="func-entry">└─ {frame}</span>')
             else:
-                # 生成层级缩进: │   │   └─
-                indent = ''.join(['│   ' for _ in range(i - 1)])
-                result.append(f'{indent}└─ {func}')
+                indent = '&nbsp;&nbsp;&nbsp;' * (i - 1)
+                result.append(f'{indent}└─ {frame}')
+        
+        return '\n'.join(result)
 
+    def _extract_from_perf_report(self, perf_text: str, func_name: str) -> str:
+        """从带调用栈的 perf report 中提取调用链"""
+        lines = perf_text.split('\n')
+        
+        # 提取搜索地址
+        search_addr = None
+        if func_name.startswith('0x') and len(func_name) > 2:
+            addr = func_name[2:]  # 去掉 0x
+            search_addr = addr
+        
+        # 查找包含目标函数的区域
+        in_target_section = False
+        call_chain = []  # 保存从根到叶子的调用链
+        current_level = -1
+        
+        for i, line in enumerate(lines):
+            stripped = line.rstrip()
+            
+            # 检查是否包含目标地址
+            if search_addr and search_addr in stripped.replace('0x', ''):
+                in_target_section = True
+            
+            if not in_target_section:
+                continue
+            
+            # 解析调用栈行
+            # 格式示例:
+            # "---0x435bb0"                    <- 热点函数 (深度0)
+            # "   0xffff899d7098"              <- 调用者 (深度1)
+            # "   0x41c55c"                    <- 调用者的调用者 (深度2)
+            
+            # 计算缩进级别（| 字符数量或空格数量）
+            indent = len(line) - len(line.lstrip())
+            level = indent // 3  # 假设每级3个字符
+            
+            # 提取地址
+            addr_match = re.search(r'0x([0-9a-f]+)', stripped)
+            if addr_match:
+                addr = addr_match.group(1)
+                
+                # 判断是内核地址还是用户地址
+                if addr.startswith('ffff'):
+                    module = 'kernel'
+                else:
+                    module = 'kanzi'
+                
+                # 添加到调用链（只添加深度 >= 当前深度的）
+                frame = f"{module}:0x{addr[-8:]}"
+                
+                # 如果是新的深度（更深），添加到调用链
+                if level > current_level:
+                    call_chain.append(frame)
+                    current_level = level
+                else:
+                    # 如果深度变浅，说明是另一个分支，重置
+                    if level < current_level:
+                        call_chain = call_chain[:level] if level > 0 else []
+                        call_chain.append(frame)
+                        current_level = level
+            
+            # 检查是否到达新的热点区域
+            if in_target_section:
+                # 尝试匹配新的热点行
+                hotspot_match = re.match(r'\s+(\d+\.?\d*)%\s+\S+\s+\S+\s+\S+\s+\[.\]\s+(0x\S+)', stripped)
+                if hotspot_match and search_addr not in hotspot_match.group(2):
+                    # 这是新的热点区域，停止
+                    break
+        
+        if not call_chain:
+            return ""
+        
+        # 去重并生成输出
+        deduped = []
+        seen = set()
+        for frame in call_chain[:20]:
+            if frame not in seen:
+                seen.add(frame)
+                deduped.append(frame)
+        
+        # 生成层级调用关系
+        result = []
+        for i, frame in enumerate(deduped):
+            if i == 0:
+                # 入口函数（根）
+                result.append(f'<span class="func-entry">└─ {frame} (root)</span>')
+            else:
+                indent = '&nbsp;&nbsp;&nbsp;' * (i - 1)
+                result.append(f'{indent}└─ {frame}')
+        
         return '\n'.join(result)
 
     def _generate_graphics_optimization_section(self) -> str:
