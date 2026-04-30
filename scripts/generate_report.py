@@ -560,9 +560,9 @@ class PerformanceReportGenerator:
     def __init__(self, data_dir: str, output_path: str = None):
         self.data_dir = Path(data_dir)
         self.output_path = output_path or str(self.data_dir / "report.html")
-        self.data: Dict = {}
-        self.issues: List[Dict] = []
-        self.suggestions: List[Dict] = []
+        self.data = {}
+        self.issues = []
+        self.suggestions = []
         
     def load_data(self) -> bool:
         """加载数据文件"""
@@ -768,7 +768,7 @@ class PerformanceReportGenerator:
         
         return result
 
-    def _extract_no_callchain_message(self, content: str) -> str:
+    def _extract_no_callchain_message(self, content: str): 
         """提取无调用链时的提示信息"""
         lines = content.split('\n')
         messages = []
@@ -800,22 +800,35 @@ class PerformanceReportGenerator:
 
             # 检测新的热点函数行（perf report 标准格式）
             # 例如: "    89.29%     0.00%  kanzi    kanzi                [.] 0x0000000000435bb0"
-            match = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
+            match = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
             if match:
                 # 保存前一个函数
                 if current_func:
                     hot_functions.append((current_func, current_pct))
                     hot_functions_data[current_func] = {"pct": current_pct, "stack": current_stack[:]}
 
-                current_pct = float(match.group(1))
+                current_pct = float(match.group(1))  # Children%
                 module = match.group(2).strip()
                 addr = match.group(3).strip()
 
-                # 提取函数名
+                # 提取函数名 - Perf report 的第5列是 Symbol（函数名）
+                # 例如: "    89.29%     0.00%  kanzi    kanzi                [.] 0x0000000000435bb0"
+                # 第1个空格后: 89.29% (Children%)
+                # 第2个空格后: 0.00% (Self%)
+                # 第3个空格后: kanzi (Command)
+                # 第4个空格后: kanzi (Shared Object/Module)
+                # 第5个空格后: [.] (类型)
+                # 第6个空格后: 0x0000000000435bb0 (Symbol/地址)
+                # 真正的函数名在第5列（Shared Object之后）
+                func_name = addr  # 使用地址作为函数名标识
+
+                # 对于 kanzi 应用，创建更友好的函数名标识
                 if module == 'kanzi' and addr.startswith('0x'):
-                    current_func = addr  # 使用地址作为函数名
+                    # 使用简短地址格式，便于阅读
+                    short_addr = addr[2:10] if len(addr) > 10 else addr[2:]
+                    current_func = f"app_0x{short_addr}"
                 else:
-                    current_func = module
+                    current_func = func_name
 
                 current_stack = []
                 has_callchain = False
@@ -856,20 +869,25 @@ class PerformanceReportGenerator:
             # perf report 格式: "[空白][Children%][空白][Self%][空白][Command][空白][Shared Object][空白][Symbol]"
             # 例如: "    89.49%     0.00%  kanzi    kanzi                [.] 0x000000000041c55c"
             # 或: "    29.07%     0.00%  kanzi    [kernel.kallsyms]    [k] 0xffff800010011d98"
-            match = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
+            match = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
             if match:
-                pct = float(match.group(1))
-                module = match.group(2).strip()
-                addr = match.group(3).strip()
-                
-                # 优先使用模块名，清理方括号
+                children_pct = float(match.group(1))  # Children% - 这个函数及其子函数占总时间的百分比
+                self_pct = float(match.group(2))       # Self% - 这个函数本身占用的时间
+                module = match.group(3).strip()
+                addr = match.group(4).strip()
+
+                # 使用模块名作为函数名标识（因为Symbol是地址）
                 func_name = module.strip('[]')
-                
-                # 对于 kanzi 应用的地址，保留地址前缀作为标识
+
+                # 对于 kanzi 应用的地址，创建更友好的函数名标识
                 if func_name == 'kanzi' and addr.startswith('0x'):
-                    # 64位地址，保留完整地址标识
-                    func_name = f"0x{addr[2:18]}"
-                
+                    # 使用简短地址格式，便于阅读
+                    short_addr = addr[2:10] if len(addr) > 10 else addr[2:]
+                    func_name = f"app_0x{short_addr}"
+
+                # CPU占比使用 Children%（这个函数占用的总CPU时间）
+                pct = children_pct
+
                 if func_name and func_name != '[unknown]':
                     # 去重
                     key = (func_name, pct)
@@ -879,17 +897,22 @@ class PerformanceReportGenerator:
                     continue
                 
             # 处理 kernel 符号格式: [k] 0xaddr
-            match2 = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[k\]\s+(0x\S+)', line)
+            match2 = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[k\]\s+(0x\S+)', line)
             if match2:
-                pct = float(match2.group(1))
-                module = match2.group(2).strip()
-                addr = match2.group(3).strip()
+                children_pct = float(match2.group(1))  # Children%
+                self_pct = float(match2.group(2))       # Self%
+                module = match2.group(3).strip()
+                addr = match2.group(4).strip()
                 func_name = module.strip('[]')
-                
-                # 保留内核地址前缀
+
+                # CPU占比使用 Children%
+                pct = children_pct
+
+                # 保留内核地址前缀，使用简短格式
                 if func_name == 'kernel.kallsyms':
-                    func_name = f"[k]0x{addr[2:18]}"
-                
+                    short_addr = addr[2:10] if len(addr) > 10 else addr[2:]
+                    func_name = f"kernel_0x{short_addr}"
+
                 if func_name:
                     key = (func_name, pct)
                     if key not in seen:
@@ -939,7 +962,7 @@ class PerformanceReportGenerator:
                 "action": "检查这些函数是否有优化空间，考虑算法优化、缓存、并行化等方式。"
             })
 
-    def _get_graphics_hot_suggestion(self, hot_funcs: List[Tuple[str, float]]) -> str:
+    def _get_graphics_hot_suggestion(self, hot_funcs: List[Tuple[str, float]]): 
         """根据热点图形函数生成具体建议"""
         suggestions = []
         for func, pct in hot_funcs:
@@ -1277,7 +1300,7 @@ class PerformanceReportGenerator:
                         "action": "持续监控内存使用趋势，检测可能的内存泄漏。"
                     })
     
-    def generate_html(self) -> str:
+    def generate_html(self): 
         """生成完整的HTML报告"""
         print("生成HTML报告...")
         
@@ -1498,7 +1521,7 @@ class PerformanceReportGenerator:
         
         return html
     
-    def _generate_header(self) -> str:
+    def _generate_header(self):
         """生成报告头部"""
         app_name = self.data.get("app_name", "未知")
         host = self.data.get("ssh_host", "未知")
@@ -1518,7 +1541,7 @@ class PerformanceReportGenerator:
         </div>
         """
     
-    def _generate_toc(self) -> str:
+    def _generate_toc(self): 
         """生成目录"""
         return """
         <nav class="nav">
@@ -1534,7 +1557,7 @@ class PerformanceReportGenerator:
         </nav>
         """
     
-    def _generate_system_overview(self) -> str:
+    def _generate_system_overview(self):
         """生成系统概览部分"""
         # 提取系统信息
         os_release = self.data.get("files", {}).get("os_release.txt", "N/A")
@@ -1618,7 +1641,7 @@ class PerformanceReportGenerator:
         </section>
         """
     
-    def _generate_compositor_section(self) -> str:
+    def _generate_compositor_section(self):
         """生成Compositor状态部分"""
         display_server = self.data.get("display_server", "wayland")
         
@@ -1675,7 +1698,7 @@ class PerformanceReportGenerator:
         </section>
             """
     
-    def _generate_app_section(self) -> str:
+    def _generate_app_section(self):
         """生成应用性能部分"""
         app_process = self.data.get("files", {}).get("app_process.txt", "N/A")
         app_status = self.data.get("files", {}).get("app_status.txt", "N/A")
@@ -1805,7 +1828,7 @@ class PerformanceReportGenerator:
         </section>
         """
     
-    def _generate_performance_chart_section(self) -> str:
+    def _generate_performance_chart_section(self): 
         """生成 CPU 和内存折线图部分"""
         perf_samples = self.data.get("files", {}).get("perf_samples.csv", "N/A")
         
@@ -1898,7 +1921,7 @@ class PerformanceReportGenerator:
         </section>
         """
     
-    def _generate_chart_from_fallback(self) -> str:
+    def _generate_chart_from_fallback(self):
         """从备用数据源(app_cpu.txt, app_status.txt)生成图表"""
         app_cpu = self.data.get("files", {}).get("app_cpu.txt", "N/A")
         app_status = self.data.get("files", {}).get("app_status.txt", "N/A")
@@ -2000,7 +2023,7 @@ class PerformanceReportGenerator:
         </section>
         """
     
-    def _generate_issues_section(self) -> str:
+    def _generate_issues_section(self):
         """生成问题诊断部分"""
         if not self.issues:
             issues_html = """
@@ -2030,7 +2053,7 @@ class PerformanceReportGenerator:
         </section>
         """
 
-    def _generate_flamegraph_section(self) -> str:
+    def _generate_flamegraph_section(self): 
         """生成火焰图分析章节"""
         perf_report = self.data.get("files", {}).get("perf_report.txt", "N/A")
         perf_flamegraph_svg = self.data.get("files", {}).get("perf_flamegraph.svg", "")
@@ -2150,16 +2173,18 @@ class PerformanceReportGenerator:
                 <tr><th>排名</th><th>函数名</th><th>CPU占比</th><th>类别</th><th>操作</th></tr>"""
             for i, (func, pct) in enumerate(hot_functions[:15]):
                 category = "图形" if func in graphics_func_names else "通用"
-                func_id = re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
+                # 改进函数名ID生成，确保一致性
+                func_id_clean = re.sub(r'[^a-zA-Z0-9]', '_', func[:30]).replace('_', '')
+                func_id = f"stack_{func_id_clean}"
                 # 高亮超过5%的热点
                 highlight_class = "high-usage" if pct >= 5 else ""
-                
+
                 # 调用栈链接（只有有调用链数据时才显示）
-                if has_callchain:
-                    action_link = f'<a href="#stack_{func_id}" class="stack-link" onclick="toggleStack(\'stack_{func_id}_content\'); return false;">查看调用栈</a>'
+                if has_callchain and pct >= 0.5:  # 只有当函数占比>=0.5%且存在调用链数据时才显示链接
+                    action_link = f'<a href="#{func_id}" class="stack-link" onclick="toggleStack(\'{func_id}_content\'); return false;">查看调用栈</a>'
                 else:
                     action_link = '<span class="no-data">无调用栈数据</span>'
-                
+
                 hot_funcs_html += f"""<tr class="{highlight_class}">
                     <td>{i+1}</td>
                     <td><code class="func-name">{self._escape_html(func)}</code></td>
@@ -2247,20 +2272,21 @@ class PerformanceReportGenerator:
         </section>
         """
 
-    def _generate_hot_function_stacks(self, stack_data: str, hot_functions: List[Tuple[str, float]]) -> str:
+    def _generate_hot_function_stacks(self, stack_data: str, hot_functions: List[Tuple[str, float]]): 
         """为热点函数生成调用栈详情"""
         html = "<h3 id='hot-stacks'>热点函数调用栈详情</h3>"
         html += "<div class='stack-details'>"
 
-        for func, pct in hot_functions:
-            if pct < 0.5:  # 只显示占比>0.5%的函数
-                continue
+        # 过滤掉CPU占比太低的函数
+        filtered_functions = [(func, pct) for func, pct in hot_functions if pct >= 0.5]
 
+        for func, pct in filtered_functions:
             # 提取该函数相关的调用栈
             func_stacks = self._extract_call_stacks(stack_data, func)
 
-            # 清理函数名用于HTML id（加上stack_前缀避免与锚点冲突）
-            func_id = "stack_" + re.sub(r'[^a-zA-Z0-9]', '_', func[:30])
+            # 改进函数名用于HTML id的清理（避免特殊字符）
+            func_id_clean = re.sub(r'[^a-zA-Z0-9]', '_', func[:30]).replace('_', '')
+            func_id = f"stack_{func_id_clean}"
 
             if func_stacks:
                 html += f"""
@@ -2296,7 +2322,7 @@ class PerformanceReportGenerator:
 
         return html
 
-    def _generate_hot_function_stacks_from_data(self, hot_functions_data: Dict) -> str:
+    def _generate_hot_function_stacks_from_data(self, hot_functions_data: Dict): 
         """从解析后的热点函数数据生成调用栈详情HTML"""
         html = "<h3 id='hot-stacks'>热点函数调用栈详情</h3>"
         html += "<div class='stack-details'>"
@@ -2337,7 +2363,7 @@ class PerformanceReportGenerator:
         html += "</div>"
         return html
 
-    def _extract_call_stacks(self, stack_data: str, func_name: str) -> str:
+    def _extract_call_stacks(self, stack_data: str, func_name: str):
         """从栈数据中提取特定函数的调用栈"""
         lines = stack_data.split('\n')
         
@@ -2355,17 +2381,20 @@ class PerformanceReportGenerator:
         
         # 提取要搜索的地址有意义部分（如果func_name是地址）
         search_addr_part = None
-        if func_name.startswith('0x') or func_name.startswith('[k]0x'):
-            addr_part = func_name.replace('[k]', '')
-            if addr_part.startswith('0x') and len(addr_part) >= 10:
-                full_addr = addr_part[2:]
-                search_addr_part = full_addr[4:12] if len(full_addr) > 12 else full_addr.lstrip('0')
-                if not search_addr_part:
-                    search_addr_part = full_addr[-8:]
-        
+        if func_name.startswith('0x') or func_name.startswith('[k]0x') or '0x' in func_name:
+            # 提取地址部分
+            addr_match = re.search(r'0x([0-9a-f]+)', func_name)
+            if addr_match:
+                full_addr = addr_match.group(1)
+                # 使用地址的最后6位进行匹配
+                if len(full_addr) >= 6:
+                    search_addr_part = full_addr[-6:]
+                else:
+                    search_addr_part = full_addr.lstrip('0')
+
         for line in lines:
             stripped = line.strip()
-            
+
             # perf script 输出格式: "comm  pid  [cpu]  time: event"
             # 检测新事件的开始
             if re.match(r'^\S+\s+\d+\s+\[\d+\]\s+\d+\.\d+:', stripped):
@@ -2374,17 +2403,21 @@ class PerformanceReportGenerator:
                 current_stack = []
                 found_target = False
                 continue
-            
+
             # 检查是否包含目标函数或地址
-            if func_name.lower() in stripped.lower():
-                found_target = True
-            elif search_addr_part:
-                addr_match = re.search(r'\t+([0-9a-f]+)\s+\[unknown\]', line)
+            if search_addr_part:
+                # 改进地址匹配 - 支持多种地址格式
+                addr_match = re.search(r'[0-9a-f]{6,}', stripped)
                 if addr_match:
-                    addr_in_line = addr_match.group(1)
-                    addr_clean = addr_in_line.lstrip('0')
-                    if search_addr_part.lstrip('0') in addr_clean or addr_clean in search_addr_part.lstrip('0'):
+                    addr_in_line = addr_match.group(0)
+                    # 检查地址的最后几位是否匹配
+                    if len(addr_in_line) >= 6 and addr_in_line[-6:] == search_addr_part:
                         found_target = True
+                    elif search_addr_part in addr_in_line:
+                        found_target = True
+            elif func_name.lower() in stripped.lower():
+                # 检查模块名匹配
+                found_target = True
             
             # 解析栈帧行
             if stripped and line.startswith('\t'):
@@ -2438,98 +2471,104 @@ class PerformanceReportGenerator:
         
         return '\n'.join(result)
 
-    def _extract_from_perf_report(self, perf_text: str, func_name: str) -> str:
+    def _extract_from_perf_report(self, perf_text: str, func_name: str): 
         """从带调用栈的 perf report 中提取调用链"""
         lines = perf_text.split('\n')
-        
-        # 提取搜索地址
+
+        # 提取搜索地址 - 改进地址匹配
         search_addr = None
         if func_name.startswith('0x') and len(func_name) > 2:
             addr = func_name[2:]  # 去掉 0x
             search_addr = addr
-        
+        elif '0x' in func_name:
+            # 从函数名中提取地址
+            addr_match = re.search(r'0x([0-9a-f]+)', func_name)
+            if addr_match:
+                search_addr = addr_match.group(1)
+
+        if not search_addr:
+            return ""
+
         # 查找包含目标函数的区域
-        in_target_section = False
         call_chain = []  # 保存从根到叶子的调用链
-        current_level = -1
-        
+        found_hotspot = False
+
         for i, line in enumerate(lines):
             stripped = line.rstrip()
-            
-            # 检查是否包含目标地址
-            if search_addr and search_addr in stripped.replace('0x', ''):
-                in_target_section = True
-            
-            if not in_target_section:
+
+            # 检查是否是热点行（包含Children%和地址）
+            hotspot_match = re.match(r'\s+(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+\S+\s+\[.\]\s+(0x\S+)', stripped)
+            if hotspot_match:
+                hotspot_addr = hotspot_match.group(2)
+                # 检查是否匹配目标地址（支持前缀匹配）
+                if search_addr in hotspot_addr or hotspot_addr.endswith(search_addr[-6:]):
+                    found_hotspot = True
+                    # 开始收集调用栈
+                    continue
+                elif found_hotspot:
+                    # 遇到新的热点，停止收集
+                    break
+
+            if not found_hotspot:
                 continue
-            
+
             # 解析调用栈行
             # 格式示例:
             # "---0x435bb0"                    <- 热点函数 (深度0)
             # "   0xffff899d7098"              <- 调用者 (深度1)
             # "   0x41c55c"                    <- 调用者的调用者 (深度2)
-            
-            # 计算缩进级别（| 字符数量或空格数量）
+
+            # 跳过非调用栈行
+            if not re.search(r'0x[0-9a-f]+', stripped):
+                continue
+
+            # 计算缩进级别
             indent = len(line) - len(line.lstrip())
             level = indent // 3  # 假设每级3个字符
-            
+
             # 提取地址
             addr_match = re.search(r'0x([0-9a-f]+)', stripped)
             if addr_match:
                 addr = addr_match.group(1)
-                
+
                 # 判断是内核地址还是用户地址
                 if addr.startswith('ffff'):
                     module = 'kernel'
+                    # 内核地址，只保留后8位
+                    frame = f"{module}:0x{addr[-8:]}"
                 else:
                     module = 'kanzi'
-                
-                # 添加到调用链（只添加深度 >= 当前深度的）
-                frame = f"{module}:0x{addr[-8:]}"
-                
-                # 如果是新的深度（更深），添加到调用链
-                if level > current_level:
-                    call_chain.append(frame)
-                    current_level = level
-                else:
-                    # 如果深度变浅，说明是另一个分支，重置
-                    if level < current_level:
-                        call_chain = call_chain[:level] if level > 0 else []
-                        call_chain.append(frame)
-                        current_level = level
-            
-            # 检查是否到达新的热点区域
-            if in_target_section:
-                # 尝试匹配新的热点行
-                hotspot_match = re.match(r'\s+(\d+\.?\d*)%\s+\S+\s+\S+\s+\S+\s+\[.\]\s+(0x\S+)', stripped)
-                if hotspot_match and search_addr not in hotspot_match.group(2):
-                    # 这是新的热点区域，停止
-                    break
-        
+                    # 用户地址，只保留后6位
+                    frame = f"{module}:0x{addr[-6:]}"
+
+                # 添加到调用链
+                call_chain.append((level, frame))
+
         if not call_chain:
             return ""
-        
-        # 去重并生成输出
+
+        # 去重并生成输出（按深度排序）
+        call_chain.sort()  # 按深度排序
         deduped = []
         seen = set()
-        for frame in call_chain[:20]:
+        for level, frame in call_chain[:20]:
             if frame not in seen:
                 seen.add(frame)
-                deduped.append(frame)
-        
+                deduped.append((level, frame))
+
         # 生成层级调用关系
         result = []
-        for i, frame in enumerate(deduped):
+        for i, (level, frame) in enumerate(deduped):
             if i == 0:
                 # 入口函数（根）
                 result.append(f'<span class="func-entry">└─ {frame} (root)</span>')
             else:
-                indent = '&nbsp;&nbsp;&nbsp;' * (i - 1)
+                indent = '&nbsp;&nbsp;&nbsp;' * (level - 1)
                 result.append(f'{indent}└─ {frame}')
-        
+
         return '\n'.join(result)
 
-    def _generate_graphics_optimization_section(self) -> str:
+    def _generate_graphics_optimization_section(self):
         """生成图形渲染优化章节"""
         opengl_info = self.data.get("files", {}).get("opengl_info.txt", "N/A")
         vulkan_info = self.data.get("files", {}).get("vulkan_info.txt", "N/A")
@@ -2590,7 +2629,7 @@ class PerformanceReportGenerator:
         </section>
         """
 
-    def _generate_graphics_optimization_suggestions(self, texture_formats: list, gl_version: str) -> str:
+    def _generate_graphics_optimization_suggestions(self, texture_formats: list, gl_version: str): 
         """生成针对当前GPU配置的图形优化建议"""
         suggestions = []
 
@@ -2619,7 +2658,7 @@ class PerformanceReportGenerator:
             return html
         return ""
 
-    def _generate_suggestions_section(self) -> str:
+    def _generate_suggestions_section(self):
         """生成优化建议部分"""
         if not self.suggestions:
             suggestions_html = """
@@ -2684,7 +2723,7 @@ class PerformanceReportGenerator:
         </section>
         """
     
-    def _escape_html(self, text: str) -> str:
+    def _escape_html(self, text: str):
         """转义HTML特殊字符"""
         if not text:
             return ""
