@@ -262,7 +262,14 @@ HTML_HEADER = """<!DOCTYPE html>
         .hot-functions-table td {{
             padding: 10px 12px;
             border-bottom: 1px solid #eee;
+            vertical-align: middle;
         }}
+
+        .hot-functions-table td:nth-child(1) {{ width: 60px; text-align: center; }}
+        .hot-functions-table td:nth-child(2) {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+        .hot-functions-table td:nth-child(3) {{ width: 100px; text-align: right; padding-right: 20px; }}
+        .hot-functions-table td:nth-child(4) {{ width: 80px; text-align: center; }}
+        .hot-functions-table td:nth-child(5) {{ width: 120px; text-align: center; }}
 
         .hot-functions-table tr:hover {{
             background: #f8f9fa;
@@ -363,9 +370,9 @@ HTML_HEADER = """<!DOCTYPE html>
             padding: 12px 15px;
             cursor: pointer;
             display: flex;
-            justify-content: space-between;
             align-items: center;
             user-select: none;
+            gap: 15px;
         }}
 
         .stack-header:hover {{
@@ -374,7 +381,9 @@ HTML_HEADER = """<!DOCTYPE html>
 
         .stack-name {{
             font-weight: bold;
-            max-width: 60%;
+            flex: 1;
+            min-width: 0;
+            max-width: calc(100% - 140px);
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -388,11 +397,13 @@ HTML_HEADER = """<!DOCTYPE html>
         }}
 
         .stack-pct {{
+            min-width: 90px;
+            text-align: right;
             background: rgba(255,255,255,0.3);
             padding: 3px 10px;
             border-radius: 12px;
             font-weight: bold;
-            font-size: 13px;
+            font-size: 14px;
         }}
 
         .stack-toggle {{
@@ -800,7 +811,9 @@ class PerformanceReportGenerator:
 
             # 检测新的热点函数行（perf report 标准格式）
             # 例如: "    89.29%     0.00%  kanzi    kanzi                [.] 0x0000000000435bb0"
-            match = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
+            # 或: "    31.88%     0.00%  kanzi    libGLESv2.so         [.] glBindFramebuffer"
+            # 或: "    31.88%     0.00%  kanzi    libGLESv2.so         [.] 0x0000ffffbe161be8"
+            match = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[.\]\s+(\S+)', line)
             if match:
                 # 保存前一个函数
                 if current_func:
@@ -808,27 +821,20 @@ class PerformanceReportGenerator:
                     hot_functions_data[current_func] = {"pct": current_pct, "stack": current_stack[:]}
 
                 current_pct = float(match.group(1))  # Children%
-                module = match.group(2).strip()
-                addr = match.group(3).strip()
+                module = match.group(3).strip()
+                symbol = match.group(4).strip()
 
-                # 提取函数名 - Perf report 的第5列是 Symbol（函数名）
-                # 例如: "    89.29%     0.00%  kanzi    kanzi                [.] 0x0000000000435bb0"
-                # 第1个空格后: 89.29% (Children%)
-                # 第2个空格后: 0.00% (Self%)
-                # 第3个空格后: kanzi (Command)
-                # 第4个空格后: kanzi (Shared Object/Module)
-                # 第5个空格后: [.] (类型)
-                # 第6个空格后: 0x0000000000435bb0 (Symbol/地址)
-                # 真正的函数名在第5列（Shared Object之后）
-                func_name = addr  # 使用地址作为函数名标识
-
-                # 对于 kanzi 应用，创建更友好的函数名标识
-                if module == 'kanzi' and addr.startswith('0x'):
-                    # 使用简短地址格式，便于阅读
-                    short_addr = addr[2:10] if len(addr) > 10 else addr[2:]
-                    current_func = f"app_0x{short_addr}"
+                # 如果符号是地址（0x开头），使用模块名
+                # 否则使用已解析的函数名
+                if symbol.startswith('0x'):
+                    if module == 'kanzi':
+                        short_addr = symbol[2:10] if len(symbol) > 10 else symbol[2:]
+                        current_func = f"app_0x{short_addr}"
+                    else:
+                        current_func = symbol  # 使用地址作为标识
                 else:
-                    current_func = func_name
+                    # 符号是已解析的函数名
+                    current_func = symbol
 
                 current_stack = []
                 has_callchain = False
@@ -868,47 +874,49 @@ class PerformanceReportGenerator:
             
             # perf report 格式: "[空白][Children%][空白][Self%][空白][Command][空白][Shared Object][空白][Symbol]"
             # 例如: "    89.49%     0.00%  kanzi    kanzi                [.] 0x000000000041c55c"
+            # 或: "    89.49%     0.00%  kanzi    kanzi                [.] _ZN5kanzi11Application..." (已解析的符号)
             # 或: "    29.07%     0.00%  kanzi    [kernel.kallsyms]    [k] 0xffff800010011d98"
-            match = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
+            # 或: "    15.51%     0.23%  kanzi    libGLESv2.so         [.] glBindFramebuffer"
+            
+            # 匹配用户空间符号 (包括已解析的函数名和未解析的地址)
+            # 支持 [.] 后面是函数名或地址
+            match = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[\.\]\s+(\S+)', line)
             if match:
-                children_pct = float(match.group(1))  # Children% - 这个函数及其子函数占总时间的百分比
-                self_pct = float(match.group(2))       # Self% - 这个函数本身占用的时间
+                children_pct = float(match.group(1))
+                self_pct = float(match.group(2))
                 module = match.group(3).strip()
-                addr = match.group(4).strip()
-
-                # 使用模块名作为函数名标识（因为Symbol是地址）
-                func_name = module.strip('[]')
-
-                # 对于 kanzi 应用的地址，创建更友好的函数名标识
-                if func_name == 'kanzi' and addr.startswith('0x'):
-                    # 使用简短地址格式，便于阅读
-                    short_addr = addr[2:10] if len(addr) > 10 else addr[2:]
-                    func_name = f"app_0x{short_addr}"
-
-                # CPU占比使用 Children%（这个函数占用的总CPU时间）
+                symbol = match.group(4).strip()
+                
+                # 如果符号是地址（0x开头），使用模块名
+                if symbol.startswith('0x'):
+                    func_name = module.strip('[]')
+                    if func_name == 'kanzi':
+                        short_addr = symbol[2:10] if len(symbol) > 10 else symbol[2:]
+                        func_name = f"app_0x{short_addr}"
+                else:
+                    # 符号是已解析的函数名，直接使用
+                    func_name = symbol
+                
                 pct = children_pct
-
+                
                 if func_name and func_name != '[unknown]':
-                    # 去重
                     key = (func_name, pct)
                     if key not in seen:
                         seen.add(key)
                         hot_funcs.append((func_name, pct))
                     continue
-                
+            
             # 处理 kernel 符号格式: [k] 0xaddr
             match2 = re.match(r'\s*(\d+\.?\d*)%\s+(\d+\.?\d*)%\s+\S+\s+(\S+)\s+\[k\]\s+(0x\S+)', line)
             if match2:
-                children_pct = float(match2.group(1))  # Children%
-                self_pct = float(match2.group(2))       # Self%
+                children_pct = float(match2.group(1))
+                self_pct = float(match2.group(2))
                 module = match2.group(3).strip()
                 addr = match2.group(4).strip()
                 func_name = module.strip('[]')
 
-                # CPU占比使用 Children%
                 pct = children_pct
 
-                # 保留内核地址前缀，使用简短格式
                 if func_name == 'kernel.kallsyms':
                     short_addr = addr[2:10] if len(addr) > 10 else addr[2:]
                     func_name = f"kernel_0x{short_addr}"
@@ -2084,16 +2092,24 @@ class PerformanceReportGenerator:
                     continue
                 
                 # perf report 格式: "[空白][Children%][空白][Self%][空白][Command][空白][Shared Object][空白][Symbol]"
-                # 例如: "    89.49%     0.00%  kanzi    kanzi                [.] 0x000000000041c55c"
-                match = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[.\]\s+(0x\S+)', line)
+                # 例如: "    31.88%     0.00%  kanzi    libGLESv2.so         [.] 0x0000ffffbe161be8"
+                # 或: "    15.51%     0.23%  kanzi    libGLESv2.so         [.] glBindFramebuffer"
+                # 正则: 跳过两个百分比，跳过Command，捕获Shared Object，然后捕获Symbol（可能是地址或函数名）
+                match = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[.\]\s+(\S+)', line)
                 if match:
                     pct = float(match.group(1))
-                    module = match.group(2).strip()
-                    addr = match.group(3).strip()
+                    shared_obj = match.group(2).strip()  # 共享对象（如 libGLESv2.so）
+                    symbol = match.group(3).strip()  # 符号（可能是地址或已解析的函数名）
                     
-                    func = module.strip('[]')
-                    if func == 'kanzi' and addr.startswith('0x'):
-                        func = f"0x{addr[2:18]}"
+                    # 如果符号是地址（0x开头），使用适当的名称
+                    # 否则使用已解析的函数名
+                    if symbol.startswith('0x'):
+                        # 地址：使用模块名:地址格式
+                        short_addr = symbol[2:10] if len(symbol) > 10 else symbol[2:]
+                        func = f"{shared_obj}:0x{short_addr}"
+                    else:
+                        # 已解析的函数名
+                        func = symbol
                     
                     if func and func != '[unknown]':
                         key = (func, pct)
@@ -2106,12 +2122,15 @@ class PerformanceReportGenerator:
                 match2 = re.match(r'\s*(\d+\.?\d*)%\s+\d+\.?\d*%\s+\S+\s+(\S+)\s+\[k\]\s+(0x\S+)', line)
                 if match2:
                     pct = float(match2.group(1))
-                    module = match2.group(2).strip()
+                    shared_obj = match2.group(2).strip()
                     addr = match2.group(3).strip()
-                    func = module.strip('[]')
                     
-                    if func == 'kernel.kallsyms':
-                        func = f"[k]0x{addr[2:18]}"
+                    # kernel 符号使用 kernel.kallsyms 模块名
+                    if shared_obj == 'kernel.kallsyms':
+                        short_addr = addr[-8:] if len(addr) > 8 else addr
+                        func = f"[k]0x{short_addr}"
+                    else:
+                        func = shared_obj
                     
                     if func:
                         key = (func, pct)
@@ -2187,7 +2206,7 @@ class PerformanceReportGenerator:
 
                 hot_funcs_html += f"""<tr class="{highlight_class}">
                     <td>{i+1}</td>
-                    <td><code class="func-name">{self._escape_html(func)}</code></td>
+                    <td title="{self._escape_html(func)}"><code class="func-name">{self._escape_html(func[:64] + "..." if len(func) > 64 else func)}</code></td>
                     <td>{pct:.2f}%</td>
                     <td><span class="category-tag {category.lower()}">{category}</span></td>
                     <td>{action_link}</td>
@@ -2288,11 +2307,14 @@ class PerformanceReportGenerator:
             func_id_clean = re.sub(r'[^a-zA-Z0-9]', '_', func[:30]).replace('_', '')
             func_id = f"stack_{func_id_clean}"
 
+            # 限制函数名显示长度
+            display_func = func[:64] + "..." if len(func) > 64 else func
+
             if func_stacks:
                 html += f"""
                 <div class="stack-function" id="{func_id}">
                     <div class="stack-header" onclick="toggleStack('{func_id}_content')">
-                        <span class="stack-name"><code>{self._escape_html(func)}</code></span>
+                        <span class="stack-name" title="{self._escape_html(func)}"><code>{self._escape_html(display_func)}</code></span>
                         <span class="stack-pct">{pct:.2f}%</span>
                         <span class="stack-toggle">▼</span>
                         <a href="#{func_id}_link" class="back-link">↑返回列表</a>
@@ -2307,7 +2329,7 @@ class PerformanceReportGenerator:
                 html += f"""
                 <div class="stack-function" id="{func_id}">
                     <div class="stack-header" onclick="toggleStack('{func_id}_content')">
-                        <span class="stack-name"><code>{self._escape_html(func)}</code></span>
+                        <span class="stack-name" title="{self._escape_html(func)}"><code>{self._escape_html(display_func)}</code></span>
                         <span class="stack-pct">{pct:.2f}%</span>
                         <span class="stack-toggle">▼</span>
                         <a href="#{func_id}_link" class="back-link">↑返回列表</a>
@@ -2336,6 +2358,9 @@ class PerformanceReportGenerator:
 
             func_id = "stack_" + re.sub(r'[^a-zA-Z0-9]', '_', func_name[:30])
 
+            # 限制函数名显示长度
+            display_func = func_name[:64] + "..." if len(func_name) > 64 else func_name
+
             # 生成调用栈HTML
             if stack:
                 stack_html = ""
@@ -2349,7 +2374,7 @@ class PerformanceReportGenerator:
                 html += f"""
                 <div class="stack-function" id="{func_id}">
                     <div class="stack-header" onclick="toggleStack('{func_id}_content')">
-                        <span class="stack-name"><code>{self._escape_html(func_name)}</code></span>
+                        <span class="stack-name" title="{self._escape_html(func_name)}"><code>{self._escape_html(display_func)}</code></span>
                         <span class="stack-pct">{pct:.2f}%</span>
                         <span class="stack-toggle">▼</span>
                         <a href="#stack_{func_id}_link" class="back-link">↑返回列表</a>
