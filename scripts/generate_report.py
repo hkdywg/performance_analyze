@@ -645,16 +645,26 @@ class PerformanceReportGenerator:
         """分析数据并识别问题"""
         print("分析性能数据...")
 
-        self._check_memory()
+        # 系统级分析
         self._check_cpu()
-        self._check_wayland()
+        self._check_memory()
+        self._check_io()
+        self._check_network()
+        self._check_threads()
+        self._check_syscalls()
+
+        # 应用级分析
         self._check_app_process()
+        self._check_wayland()
 
         # 新增：火焰图数据分析
         self._check_flamegraph_data()
 
         # 新增：图形学特定分析
         self._check_graphics_optimization()
+
+        # 新增：性能评分
+        self._calculate_performance_score()
 
         print(f"发现 {len(self.issues)} 个问题, {len(self.suggestions)} 条建议")
     
@@ -672,6 +682,462 @@ class PerformanceReportGenerator:
             except:
                 return None
         return None
+
+    #============================================================================
+    # I/O性能分析
+    #============================================================================
+    def _check_io(self):
+        """检查I/O性能"""
+        io_content = self.data.get("files", {}).get("app_io.txt", "")
+        vmstat_content = self.data.get("files", {}).get("vmstat.txt", "")
+        iostat_content = self.data.get("files", {}).get("iostat.txt", "")
+
+        if not io_content or io_content == "N/A":
+            return
+
+        # 分析应用I/O统计
+        reads = self._extract_value(io_content, r"read_bytes:\s+(\d+)")
+        writes = self._extract_value(io_content, r"write_bytes:\s+(\d+)")
+
+        if reads and writes:
+            try:
+                reads_kb = int(reads) / 1024
+                writes_kb = int(writes) / 1024
+                total_io = reads_kb + writes_kb
+
+                # 评估I/O性能
+                if total_io > 100000000:  # 100MB
+                    self.issues.append({
+                        "severity": "warning",
+                        "title": "应用程序I/O量较大",
+                        "detail": f"应用程序I/O总量: {total_io/1024/1024:.2f}MB (读: {reads_kb/1024/1024:.2f}MB, 写: {writes_kb/1024/1024:.2f}MB)"
+                    })
+
+                # 检查是否有异常高的单次读写
+                if reads_kb > 1048576 or writes_kb > 1048576:  # 1MB
+                    self.suggestions.append({
+                        "title": "I/O优化建议",
+                        "content": "检测到较大单次I/O操作",
+                        "action": "考虑使用批处理、内存缓存或异步I/O减少单次操作大小。"
+                    })
+            except:
+                pass
+
+        # 分析vmstat中的I/O等待
+        if vmstat_content:
+            wa = self._extract数值(vmstat_content, r"\d+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+")
+            if wa and wa > 20:
+                self.issues.append({
+                    "severity": "warning",
+                    "title": "系统I/O等待较高",
+                    "detail": f"I/O等待时间: {wa}%，可能存在I/O瓶颈"
+                })
+                self.suggestions.append({
+                    "title": "I/O优化建议",
+                    "content": "CPU大量时间在等待I/O操作完成",
+                    "action": "检查磁盘I/O模式，考虑使用更快的存储设备或优化I/O调度策略。"
+                })
+
+        # 分析iostat（如果有）
+        if iostat_content and iostat_content != "N/A":
+            self._analyze_iostat(iostat_content)
+
+    def _analyze_iostat(self, iostat_content: str):
+        """分析iostat输出"""
+        # 查找高利用率设备
+        lines = iostat_content.split('\n')
+        for line in lines:
+            if 'Device' in line or 'sda' in line or 'mmcblk' in line:
+                parts = line.split()
+                if len(parts) >= 8:
+                    device = parts[0]
+                    util = parts[5]  # utilization
+
+                    try:
+                        util_val = float(util)
+                        if util_val > 80:
+                            self.suggestions.append({
+                                "title": f"磁盘I/O设备 {device} 负载高",
+                                "category": "io",
+                                "content": f"设备利用率: {util_val}%",
+                                "action": f"检查 {device} 设备是否为存储瓶颈，考虑升级存储设备或优化文件系统。"
+                            })
+                    except:
+                        pass
+
+    #============================================================================
+    # 网络性能分析
+    #============================================================================
+    def _check_network(self):
+        """检查网络性能"""
+        net_dev_content = self.data.get("files", {}).get("net_dev.txt", "")
+        net_stat_content = self.data.get("files", {}).get("net_stat.txt", "")
+
+        if not net_dev_content or net_dev_content == "N/A":
+            return
+
+        # 分析网络设备统计
+        lines = net_dev_content.split('\n')
+        for line in lines:
+            if 'lo:' in line or 'eth' in line or 'enp' in line:
+                parts = line.split()
+                if len(parts) >= 10:
+                    device = parts[0]
+                    rx_bytes = parts[1]
+                    tx_bytes = parts[9]
+
+                    try:
+                        rx_bytes_val = int(rx_bytes)
+                        tx_bytes_val = int(tx_bytes)
+
+                        # 如果有之前的网络统计，计算速率
+                        if net_stat_content:
+                            # 这里可以添加网络速率计算
+                            pass
+                    except:
+                        pass
+
+    #============================================================================
+    # 线程与锁分析
+    #============================================================================
+    def _check_threads(self):
+        """检查线程状态和锁竞争"""
+        app_threads_content = self.data.get("files", {}).get("app_threads.txt", "")
+        app_status_content = self.data.get("files", {}).get("app_status.txt", "")
+
+        if not app_threads_content or app_threads_content == "N/A":
+            return
+
+        # 计算线程状态分布
+        lines = app_threads_content.split('\n')
+        thread_states = {
+            'R': 0, 'S': 0, 'D': 0, 't': 0,  # 运行、睡眠、不可中断、停止
+            'Z': 0, 'X': 0, 'x': 0, 'K': 0, 'PID': 0
+        }
+
+        for line in lines:
+            if 'R' in line:
+                thread_states['R'] += 1
+            elif 'S' in line:
+                thread_states['S'] += 1
+            elif 'D' in line:
+                thread_states['D'] += 1
+
+        total_threads = sum(thread_states.values()) - 1  # 减去PID行
+
+        if total_threads > 0:
+            # 检查是否有不可中断睡眠线程（D状态）
+            if thread_states['D'] > 0:
+                self.issues.append({
+                    "severity": "error",
+                    "title": "检测到不可中断睡眠线程",
+                    "detail": f"{thread_states['D']} 个线程处于不可中断状态(D)，可能阻塞在I/O操作"
+                })
+
+            # 检查线程数是否过多
+            if total_threads > 32:
+                self.suggestions.append({
+                    "title": "线程数量优化建议",
+                    "category": "threads",
+                    "content": f"当前线程数: {total_threads}",
+                    "action": f"考虑减少线程数量，合理使用线程池，避免线程数量过多导致上下文切换开销。"
+                })
+
+            # 检查睡眠线程占比
+            sleep_ratio = thread_states['S'] / total_threads
+            if sleep_ratio > 0.9:
+                self.suggestions.append({
+                    "title": "线程休眠状态优化",
+                    "category": "threads",
+                    "content": "大量线程处于睡眠状态",
+                    "action": "考虑使用事件驱动架构或异步IO减少线程数量。"
+                })
+
+    #============================================================================
+    # 系统调用分析
+    #============================================================================
+    def _check_syscalls(self):
+        """检查系统调用频率和模式"""
+        syscall_content = self.data.get("files", {}).get("syscall_counts.txt", "")
+
+        if not syscall_content or syscall_content == "N/A":
+            return
+
+        # 分析高频系统调用
+        blocking_calls = ['read', 'write', 'poll', 'select', 'epoll', 'open', 'close', 'mmap']
+        high_freq_calls = []
+
+        lines = syscall_content.split('\n')
+        for line in lines:
+            if not line.strip() or line.startswith('#'):
+                continue
+
+            # 尝试解析 syscall count 格式
+            parts = line.split()
+            if len(parts) >= 2:
+                syscall = parts[0]
+                count_str = parts[1]
+
+                try:
+                    count = int(count_str)
+                    if count > 1000:
+                        high_freq_calls.append((syscall, count))
+                except:
+                    pass
+
+        if high_freq_calls:
+            # 找出高频阻塞调用
+            blocking_calls_high = [(s, c) for s, c in high_freq_calls if s in blocking_calls]
+
+            if blocking_calls_high:
+                self.suggestions.append({
+                    "title": "系统调用优化建议",
+                    "category": "syscall",
+                    "content": f"检测到高频阻塞调用: {', '.join([f'{s}({c})' for s, c in blocking_calls_high[:5]])}",
+                    "action": "考虑使用批处理、缓存或异步IO减少系统调用次数。"
+                })
+
+            # 找出高频文件操作
+            file_ops = [(s, c) for s, c in high_freq_calls if s in ['read', 'write', 'open', 'close']]
+            if file_ops:
+                self.suggestions.append({
+                    "title": "文件操作优化",
+                    "category": "file_io",
+                    "content": f"高频文件操作: {', '.join([f'{s}({c})' for s, c in file_ops[:3]])}",
+                    "action": "考虑使用内存文件系统、预读或文件缓存优化文件访问。"
+                })
+
+    #============================================================================
+    # 性能评分计算
+    #============================================================================
+    def _calculate_performance_score(self):
+        """计算综合性能评分"""
+        score = 100  # 基础分
+
+        # 1. CPU评分
+        cpu_score = self._score_cpu()
+        score -= (100 - cpu_score) * 0.2
+
+        # 2. 内存评分
+        mem_score = self._score_memory()
+        score -= (100 - mem_score) * 0.2
+
+        # 3. I/O评分
+        io_score = self._score_io()
+        score -= (100 - io_score) * 0.15
+
+        # 4. 线程评分
+        thread_score = self._score_threads()
+        score -= (100 - thread_score) * 0.1
+
+        # 5. 图形性能评分
+        graphics_score = self._score_graphics()
+        score -= (100 - graphics_score) * 0.15
+
+        score = max(0, min(100, score))
+
+        # 添加评分到问题列表
+        if score >= 90:
+            self.suggestions.append({
+                "title": "性能综合评分",
+                "category": "score",
+                "content": f"性能综合评分: {score:.1f}/100 (优秀)",
+                "action": "系统运行状态良好，继续保持当前性能水平。"
+            })
+        elif score >= 70:
+            self.suggestions.append({
+                "title": "性能综合评分",
+                "category": "score",
+                "content": f"性能综合评分: {score:.1f}/100 (良好)",
+                "action": "存在轻微性能问题，建议关注上述优化建议。"
+            })
+        elif score >= 50:
+            self.issues.append({
+                "severity": "warning",
+                "title": "性能综合评分",
+                "detail": f"性能综合评分: {score:.1f}/100 (需关注)"
+            })
+            self.suggestions.append({
+                "title": "性能优化建议",
+                "content": "存在明显性能问题，建议重点关注性能瓶颈和优化方向",
+                "action": "查看报告中的问题诊断章节和优化建议。"
+            })
+        else:
+            self.issues.append({
+                "severity": "error",
+                "title": "性能综合评分",
+                "detail": f"性能综合评分: {score:.1f}/100 (较差)"
+            })
+            self.suggestions.append({
+                "title": "紧急性能优化",
+                "content": "系统性能存在严重问题",
+                "action": "建议立即进行深度性能分析和针对性优化。"
+            })
+
+        # 计算瓶颈权重
+        bottle_neck = self._identify_bottleneck()
+        self.suggestions.append({
+            "title": "性能瓶颈权重分析",
+            "category": "analysis",
+            "content": f"主要瓶颈: {bottle_neck}",
+            "action": f"优化 {bottle_neck} 相关的性能问题可显著提升系统整体性能。"
+        })
+
+    def _score_cpu(self) -> float:
+        """计算CPU评分"""
+        cpu_score = 100
+
+        # 检查CPU使用率
+        app_cpu = self.data.get("files", {}).get("app_cpu.txt", "")
+        if app_cpu and app_cpu != "N/A":
+            # 从top输出获取CPU%
+            cpu_match = re.search(r'(\d+\.?\d*)\s*%', app_cpu)
+            if cpu_match:
+                try:
+                    cpu_val = float(cpu_match.group(1))
+                    if cpu_val > 80:
+                        cpu_score -= (cpu_val - 80) * 2
+                    elif cpu_val > 50:
+                        cpu_score -= (cpu_val - 50)
+                except:
+                    pass
+
+        return max(0, min(100, cpu_score))
+
+    def _score_memory(self) -> float:
+        """计算内存评分"""
+        mem_score = 100
+        mem_content = self.data.get("files", {}).get("memory.txt", "")
+
+        if not mem_content or mem_content == "N/A":
+            return mem_score
+
+        # 提取内存使用
+        total = self._extract_value(mem_content, r"Mem:\s+(\d+)")
+        available = self._extract_value(mem_content, r"Mem:\s+\d+\s+(\d+)")
+
+        if total and available:
+            try:
+                total_kb = int(total)
+                avail_kb = int(available)
+                used_pct = (1 - avail_kb / total_kb) * 100
+
+                if used_pct > 90:
+                    mem_score -= (used_pct - 90) * 3
+                elif used_pct > 75:
+                    mem_score -= (used_pct - 75) * 1.5
+                elif used_pct > 60:
+                    mem_score -= (used_pct - 60)
+            except:
+                pass
+
+        return max(0, min(100, mem_score))
+
+    def _score_io(self) -> float:
+        """计算I/O评分"""
+        io_score = 100
+
+        # 检查I/O等待
+        vmstat_content = self.data.get("files", {}).get("vmstat.txt", "")
+        if vmstat_content:
+            wa = self._extract数值(vmstat_content, r"\d+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+")
+            if wa and wa > 30:
+                io_score -= (wa - 30) * 2
+
+        return max(0, min(100, io_score))
+
+    def _score_threads(self) -> float:
+        """计算线程评分"""
+        thread_score = 100
+        app_threads_content = self.data.get("files", {}).get("app_threads.txt", "")
+
+        if not app_threads_content or app_threads_content == "N/A":
+            return thread_score
+
+        # 计算线程数
+        lines = app_threads_content.split('\n')
+        thread_count = sum(1 for line in lines if line.strip() and ' ' in line) - 1  # 减去PID行
+
+        if thread_count > 32:
+            thread_score -= (thread_count - 32) * 2
+        elif thread_count > 16:
+            thread_score -= (thread_count - 16)
+
+        return max(0, min(100, thread_score))
+
+    def _score_graphics(self) -> float:
+        """计算图形性能评分"""
+        graphics_score = 100
+
+        # 检查OpenGL版本
+        opengl_info = self.data.get("files", {}).get("opengl_info.txt", "")
+        if opengl_info and opengl_info != "N/A":
+            # 提取版本
+            gl_version = re.search(r'OpenGL version string:\s*(.+)', opengl_info)
+            if gl_version:
+                version_str = gl_version.group(1)
+                version_match = re.search(r'(\d+)\.(\d+)', version_str)
+                if version_match:
+                    major, minor = int(version_match.group(1)), int(version_match.group(2))
+                    if major < 3:
+                        graphics_score -= 20
+                    elif major == 3 and minor < 2:
+                        graphics_score -= 10
+
+        # 检查热点函数
+        hot_funcs = self.data.get("files", {}).get("hot_functions_stacks.txt", "")
+        if hot_funcs and hot_funcs != "N/A" and "采集失败" not in hot_funcs:
+            # 从stack_counts.txt统计图形函数调用频率
+            func_counts = self._count_graphics_functions()
+            high_graphics_calls = sum(1 for count in func_counts.values() if count > 10000)
+
+            if high_graphics_calls > 5:
+                graphics_score -= high_graphics_calls * 5
+
+        return max(0, min(100, graphics_score))
+
+    def _count_graphics_functions(self) -> Dict[str, int]:
+        """统计图形函数调用频率"""
+        func_counts = {}
+        func_content = self.data.get("files", {}).get("stack_counts.txt", "")
+
+        if not func_content or func_content == "N/A":
+            return func_counts
+
+        # 图形相关函数关键字
+        graphics_keywords = ['gl', 'egl', 'drm', 'gpu', ' Mesa', 'intel', 'i915', 'pvrsrv', 'libsrv']
+
+        lines = func_content.split('\n')
+        for line in lines:
+            if not line.strip() or line.startswith('#'):
+                continue
+
+            # 提取函数名
+            parts = line.split()
+            if len(parts) >= 2:
+                func_name = parts[0]
+                for keyword in graphics_keywords:
+                    if keyword.lower() in func_name.lower():
+                        func_counts[func_name] = func_counts.get(func_name, 0) + 1
+                        break
+
+        return func_counts
+
+    def _identify_bottleneck(self) -> str:
+        """识别主要性能瓶颈"""
+        scores = {
+            'CPU': self._score_cpu(),
+            'Memory': self._score_memory(),
+            'I/O': self._score_io(),
+            'Threads': self._score_threads(),
+            'Graphics': self._score_graphics()
+        }
+
+        # 找出最低分对应的瓶颈
+        sorted_scores = sorted(scores.items(), key=lambda x: x[1])
+        bottleneck = sorted_scores[0][0] if sorted_scores[0][1] < 80 else "无明显瓶颈"
+
+        return bottleneck
 
     #============================================================================
     # 火焰图数据分析
@@ -1338,6 +1804,15 @@ class PerformanceReportGenerator:
         # 问题诊断
         html += self._generate_issues_section()
 
+        # 性能评分
+        html += self._generate_performance_score_section()
+
+        # I/O性能分析
+        html += self._generate_io_analysis_section()
+
+        # 线程与锁分析
+        html += self._generate_threads_analysis_section()
+
         # 火焰图分析
         html += self._generate_flamegraph_section()
 
@@ -1346,7 +1821,7 @@ class PerformanceReportGenerator:
 
         # 优化建议
         html += self._generate_suggestions_section()
-        
+
         # 添加 Chart.js 和图表渲染脚本
         html += '''
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -1549,7 +2024,7 @@ class PerformanceReportGenerator:
         </div>
         """
     
-    def _generate_toc(self): 
+    def _generate_toc(self):
         """生成目录"""
         return """
         <nav class="nav">
@@ -1558,8 +2033,11 @@ class PerformanceReportGenerator:
                 <li><a href="#compositor">Compositor状态</a></li>
                 <li><a href="#application">应用性能</a></li>
                 <li><a href="#issues">问题诊断</a></li>
+                <li><a href="#perf-chart">性能趋势</a></li>
                 <li><a href="#flamegraph">火焰图</a></li>
                 <li><a href="#graphics">图形优化</a></li>
+                <li><a href="#io-analysis">I/O性能</a></li>
+                <li><a href="#threads-analysis">线程分析</a></li>
                 <li><a href="#suggestions">优化建议</a></li>
             </ul>
         </nav>
@@ -1652,18 +2130,18 @@ class PerformanceReportGenerator:
     def _generate_compositor_section(self):
         """生成Compositor状态部分"""
         display_server = self.data.get("display_server", "wayland")
-        
+
         if display_server == "wayland":
             weston_info = self.data.get("files", {}).get("weston_info.txt", "N/A")
             weston_log = self.data.get("files", {}).get("weston_log.txt", "N/A")
             compositor_procs = self.data.get("files", {}).get("compositor_process.txt", "N/A")
-            
+
             has_errors = "error" in weston_log.lower() if weston_log != "N/A" else False
-            
+
             return f"""
         <section id="compositor" class="card">
-            <h2>3. Compositor状态 (Wayland/Weston)</h2>
-            
+            <h2>2. Compositor状态 (Wayland/Weston)</h2>
+
             <div class="grid">
                 <div class="stat-box">
                     <div class="value">{"运行中" if weston_info != "N/A" else "未运行"}</div>
@@ -1674,13 +2152,13 @@ class PerformanceReportGenerator:
                     <div class="label">日志状态</div>
                 </div>
             </div>
-            
+
             <h3>Weston信息</h3>
             <pre>{self._escape_html(weston_info[:2000]) if weston_info != 'N/A' else 'Weston未运行或无法获取信息'}</pre>
-            
+
             <h3>Compositor进程</h3>
             <pre>{self._escape_html(compositor_procs[:1000]) if compositor_procs != 'N/A' else 'N/A'}</pre>
-            
+
             <h3>最近日志</h3>
             <pre>{self._escape_html(weston_log[:2000]) if weston_log != 'N/A' else 'N/A'}</pre>
         </section>
@@ -1690,17 +2168,17 @@ class PerformanceReportGenerator:
             drm_nodes = self.data.get("files", {}).get("drm_nodes.txt", "N/A")
             fbset = self.data.get("files", {}).get("fbset.txt", "N/A")
             framebuffer = self.data.get("files", {}).get("framebuffer.txt", "N/A")
-            
+
             return f"""
         <section id="compositor" class="card">
-            <h2>3. DRM状态 (无Compositor)</h2>
-            
+            <h2>2. DRM状态 (无Compositor)</h2>
+
             <h3>DRM设备节点</h3>
             <pre>{self._escape_html(drm_nodes[:1000]) if drm_nodes != 'N/A' else 'N/A'}</pre>
-            
+
             <h3>Framebuffer信息</h3>
             <pre>{self._escape_html(fbset[:1500]) if fbset != 'N/A' else 'N/A'}</pre>
-            
+
             <h3>虚拟显示尺寸</h3>
             <pre>{framebuffer if framebuffer != 'N/A' else 'N/A'}</pre>
         </section>
@@ -1796,8 +2274,8 @@ class PerformanceReportGenerator:
         
         return f"""
         <section id="application" class="card">
-            <h2>4. 应用性能</h2>
-            
+            <h2>3. 应用性能</h2>
+
             <div class="grid">
                 <div class="stat-box">
                     <div class="value">{"PID: " + app_pid if app_pid and app_pid != "N/A" else "未运行"}</div>
@@ -1830,7 +2308,7 @@ class PerformanceReportGenerator:
 
             <h3>内存详情 (VmRSS/VmSize)</h3>
             <pre>{self._escape_html(app_memory[:1500]) if app_memory and app_memory != 'N/A' and app_memory.strip() else 'N/A'}</pre>
-            
+
             <h3>内存映射概览</h3>
             <pre>{self._escape_html(app_smaps[:1500]) if app_smaps != 'N/A' else 'N/A'}</pre>
         </section>
@@ -1911,8 +2389,8 @@ class PerformanceReportGenerator:
         # 生成 JSON 数据供 JavaScript 使用
         return f"""
         <section id="perf-chart" class="card">
-            <h2>3. 性能趋势</h2>
-            
+            <h2>5. 性能趋势</h2>
+
             <div class="chart-container">
                 <h3>应用性能趋势 (CPU、内存)</h3>
                 <canvas id="perfChart"></canvas>
@@ -2053,13 +2531,348 @@ class PerformanceReportGenerator:
                     <p>{detail}</p>
                 </div>
                 """
-        
+
         return f"""
         <section id="issues" class="card">
-            <h2>5. 问题诊断</h2>
+            <h2>4. 问题诊断</h2>
             {issues_html}
         </section>
         """
+
+    def _generate_performance_score_section(self):
+        """生成性能评分章节"""
+        # 生成评分分析
+        scores = {
+            'CPU': self._score_cpu(),
+            'Memory': self._score_memory(),
+            'I/O': self._score_io(),
+            'Threads': self._score_threads(),
+            'Graphics': self._score_graphics()
+        }
+
+        total_score = self._calculate_performance_score() if hasattr(self, '_calculate_performance_score') else 100
+        bottleneck = self._identify_bottleneck() if hasattr(self, '_identify_bottleneck') else "无明显瓶颈"
+
+        # 计算权重
+        weights = [s[1] for s in scores.items()]
+
+        return f"""
+        <section id="performance-score" class="card">
+            <h2>9. 性能综合评估</h2>
+            <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+        	<div class="stat-box" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+        	    <div class="value" style="font-size: 3em; color: white;">{total_score if total_score is not None else 0:.0f}</div>
+        	    <div class="label" style="color: rgba(255,255,255,0.9);">综合评分</div>
+        	</div>
+        	<div class="stat-box">
+        	    <div class="value" style="color: #667eea;">{bottleneck}</div>
+        	    <div class="label">主要瓶颈</div>
+        	</div>
+            </div>
+            <h3>分项评分</h3>
+            <table>
+        	<tr><th>维度</th><th>得分</th><th>评价</th><th>权重</th></tr>
+        	{self._generate_score_row('CPU', scores.get('CPU', 100))}
+        	{self._generate_score_row('Memory', scores.get('Memory', 100))}
+        	{self._generate_score_row('I/O', scores.get('I/O', 100))}
+        	{self._generate_score_row('Threads', scores.get('Threads', 100))}
+        	{self._generate_score_row('Graphics', scores.get('Graphics', 100))}
+            </table>
+            <h3>性能优化优先级</h3>
+            <div class="suggestion">
+        	<h4>优化策略建议</h4>
+        	{self._generate_optimization_priority(scores, bottleneck)}
+            </div>
+            <h3>改进路线图</h3>
+            <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px;">
+        	<div class="card" style="padding: 15px; margin: 0;">
+        	    <h4> 高优先级</h4>
+        	    <p>{self._get_high_priority_actions()}</p>
+        	</div>
+        	<div class="card" style="padding: 15px; margin: 0;">
+        	    <h4> 中优先级</h4>
+        	    <p>{self._get_medium_priority_actions()}</p>
+        	</div>
+        	<div class="card" style="padding: 15px; margin: 0;">
+        	    <h4> 低优先级</h4>
+        	    <p>{self._get_low_priority_actions()}</p>
+        	</div>
+            </div>
+        </section>
+        """
+    def _generate_score_row(self, category: str, score: float) -> str:
+        """生成评分表格行"""
+        if score >= 90:
+            status = '<span class="status normal">优秀</span>'
+        elif score >= 70:
+            status = '<span class="status warning">良好</span>'
+        elif score >= 50:
+            status = '<span class="status warning">需关注</span>'
+        else:
+            status = '<span class="status error">较差</span>'
+
+        return f"""
+        <tr>
+            <td>{category}</td>
+            <td>{score:.1f}</td>
+            <td>{status}</td>
+            <td>{self._get_weight_percentage(score)}</td>
+        </tr>
+        """
+
+    def _get_weight_percentage(self, score: float) -> str:
+        """获取权重百分比"""
+        if score >= 90:
+            return '30% - 不影响整体性能'
+        elif score >= 70:
+            return '20% - 轻微影响'
+        elif score >= 50:
+            return '15% - 中等影响'
+        else:
+            return '10% - 严重影响'
+
+    def _generate_optimization_priority(self, scores: Dict[str, float], bottleneck: str) -> str:
+        """生成优化优先级建议"""
+        sorted_items = sorted(scores.items(), key=lambda x: x[1])
+
+        if sorted_items[0][1] < 50:
+            return "当前性能存在严重问题，建议立即进行深度性能优化。优先解决 {bottleneck} 相关问题。"
+
+        elif sorted_items[0][1] < 70:
+            return "性能状况良好，但仍有优化空间。建议关注 {bottleneck} 相关优化，可提升系统响应速度。"
+
+        else:
+            return "性能表现优异，建议继续监控性能指标，保持当前优化水平。"
+
+    def _get_high_priority_actions(self) -> str:
+        """获取高优先级优化行动"""
+        actions = []
+
+        # CPU相关
+        cpu_score = self._score_cpu()
+        if cpu_score < 70:
+            actions.append("优化高CPU使用率的热点函数")
+            actions.append("考虑使用多线程/异步IO分散CPU负载")
+
+        # 内存相关
+        mem_score = self._score_memory()
+        if mem_score < 70:
+            actions.append("优化内存分配策略")
+            actions.append("检查内存泄漏并修复")
+
+        # I/O相关
+        io_score = self._score_io()
+        if io_score < 70:
+            actions.append("优化I/O操作，使用缓冲和批处理")
+            actions.append("考虑使用更快的存储设备或优化文件系统")
+
+        # 线程相关
+        thread_score = self._score_threads()
+        if thread_score < 70:
+            actions.append("减少线程数量或使用线程池")
+            actions.append("优化线程同步机制，减少锁竞争")
+
+        return "<ul>" + "".join(f"<li>{action}</li>" for action in actions[:4]) + "</ul>" if actions else "<p>暂无高优先级优化项</p>"
+
+    def _get_medium_priority_actions(self) -> str:
+        """获取中优先级优化行动"""
+        actions = []
+
+        # 图形相关
+        graphics_score = self._score_graphics()
+        if graphics_score < 70:
+            actions.append("优化图形渲染管线")
+            actions.append("使用纹理压缩减少内存占用")
+
+        # 系统调用相关
+        syscalls = self.data.get("files", {}).get("syscall_counts.txt", "")
+        if syscalls and syscalls != "N/A":
+            actions.append("减少高频系统调用")
+
+        if not actions:
+            return "<p>暂无中优先级优化项</p>"
+
+        return "<ul>" + "".join(f"<li>{action}</li>" for action in actions[:3]) + "</ul>"
+
+    def _get_low_priority_actions(self) -> str:
+        """获取低优先级优化行动"""
+        actions = [
+            "代码优化和重构",
+            "使用性能分析工具进行持续监控",
+            "考虑硬件升级或架构优化"
+        ]
+
+        return "<ul>" + "".join(f"<li>{action}</li>" for action in actions[:3]) + "</ul>"
+
+    def _generate_io_analysis_section(self):
+        """生成I/O性能分析章节"""
+        io_content = self.data.get("files", {}).get("app_io.txt", "")
+        vmstat_content = self.data.get("files", {}).get("vmstat.txt", "")
+
+        if not io_content or io_content == "N/A":
+            return """
+        <section id="io-analysis" class="card">
+            <h2>10. I/O性能分析</h2>
+            <div class="no-data">暂无I/O性能数据</div>
+        </section>
+            """
+        read_pattern = r'read_bytes:\s+(\d+)'
+        write_pattern = r'write_bytes:\s+(\d+)'
+        format_mb = lambda v: f"{int(v)/1024/1024:.2f} MB"
+        return f"""
+        <section id="io-analysis" class="card">
+            <h2>8. I/O性能分析</h2>
+            <h3>应用程序I/O统计</h3>
+            <table>
+        	<tr><th>指标</th><th>值</th><th>评估</th></tr>
+        	{self._generate_io_row('读取字节数', io_content, read_pattern, format_mb)}
+        	{self._generate_io_row('写入字节数', io_content, write_pattern, format_mb)}
+            </table>
+            <h3>系统I/O等待</h3>
+            <div class="stat-box">
+        	<div class="value">{self._extract_io_wait(vmstat_content)}%</div>
+        	<div class="label">I/O等待时间占比</div>
+            </div>
+            {self._generate_io_suggestions(io_content, vmstat_content)}
+        </section>
+        """
+
+    def _generate_io_row(self, label: str, content: str, pattern: str, formatter: callable) -> str:
+        """生成I/O指标行"""
+        value = self._extract_value(content, pattern)
+        if value:
+            formatted_value = formatter(value)
+            return f"<tr><td>{label}</td><td>{formatted_value}</td><td>{self._evaluate_io_value(value)}</td></tr>"
+        return f"<tr><td>{label}</td><td>N/A</td><td>未知</td></tr>"
+
+    def _evaluate_io_value(self, value: str) -> str:
+        """评估I/O值"""
+        try:
+            val = int(value)
+            if val < 10000:
+                return '<span class="status normal">正常</span>'
+            elif val < 1000000:
+                return '<span class="status warning">较高</span>'
+            else:
+                return '<span class="status error">很高</span>'
+        except:
+            return "未知"
+
+    def _extract_io_wait(self, vmstat_content: str) -> str:
+        """提取I/O等待时间"""
+        if vmstat_content:
+            wa = self._extract数值(vmstat_content, r"\d+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+")
+            if wa:
+                return str(wa)
+        return "N/A"
+
+    def _generate_io_suggestions(self, io_content: str, vmstat_content: str) -> str:
+        """生成I/O优化建议"""
+        suggestions = []
+
+        # 从vmstat检查I/O等待
+        io_wait = self._extract_io_wait(vmstat_content)
+        if io_wait and io_wait != 'N/A' and float(io_wait) > 20:
+            suggestions.append(f"系统I/O等待时间较高 ({io_wait}%)，建议检查磁盘I/O瓶颈。")
+
+        # 从io_content检查单次操作大小
+        reads = self._extract_value(io_content, r'read_bytes:\s+(\d+)')
+        writes = self._extract_value(io_content, r'write_bytes:\s+(\d+)')
+
+        if reads:
+            try:
+                reads_mb = int(reads) / 1024 / 1024
+                if reads_mb > 1:  # 1MB
+                    suggestions.append(f"检测到较大单次读取操作 ({reads_mb:.2f}MB)，考虑使用内存缓存。")
+            except:
+                pass
+
+        if writes:
+            try:
+                writes_mb = int(writes) / 1024 / 1024
+                if writes_mb > 1:  # 1MB
+                    suggestions.append(f"检测到较大单次写入操作 ({writes_mb:.2f}MB)，考虑使用批处理。")
+            except:
+                pass
+
+        if not suggestions:
+            return '<p>当前I/O性能状况良好，暂无特别优化建议。</p>'
+
+        return "<div class='suggestion'>" + "<p>" + "</p><p>".join(suggestions) + "</p></div>"
+
+    def _generate_threads_analysis_section(self):
+        """生成线程与锁分析章节"""
+        app_threads_content = self.data.get("files", {}).get("app_threads.txt", "")
+        app_status_content = self.data.get("files", {}).get("app_status.txt", "")
+
+        if not app_threads_content or app_threads_content == "N/A":
+            return """
+        <section id="threads-analysis" class="card">
+            <h2>9. 线程与锁分析</h2>
+            <div class="no-data">暂无线程数据</div>
+        </section>
+            """
+
+        return f"""
+        <section id="threads-analysis" class="card">
+            <h2>9. 线程与锁分析</h2>
+
+            <h3>线程统计</h3>
+            <table>
+                <tr><th>状态</th><th>数量</th><th>占比</th></tr>
+                {self._generate_thread_row(app_threads_content, 'R', '运行中', 0)}
+                {self._generate_thread_row(app_threads_content, 'S', '睡眠中', 0)}
+                {self._generate_thread_row(app_threads_content, 'D', '不可中断', 0)}
+            </table>
+
+            <h3>线程分析</h3>
+            {self._generate_thread_suggestions(app_threads_content, app_status_content)}
+        </section>
+        """
+
+    def _generate_thread_row(self, content: str, state: str, label: str, offset: int) -> str:
+        """生成线程统计行"""
+        count = 0
+        if content and content != "N/A":
+            lines = content.split('\n')
+            for line in lines:
+                if state in line:
+                    count += 1
+
+        total = count + offset
+        if total > 0:
+            percentage = (count / total) * 100
+            return f"<tr><td>{label} ({state})</td><td>{count}</td><td>{percentage:.1f}%</td></tr>"
+        return f"<tr><td>{label} ({state})</td><td>{count}</td><td>N/A</td></tr>"
+
+    def _generate_thread_suggestions(self, threads_content: str, status_content: str) -> str:
+        """生成线程分析建议"""
+        suggestions = []
+
+        # 分析线程数
+        lines = threads_content.split('\n')
+        thread_count = sum(1 for line in lines if line.strip() and ' ' in line) - 1
+
+        if thread_count > 32:
+            suggestions.append(f"线程数量较多 ({thread_count}个)，可能增加上下文切换开销。")
+
+        # 检查不可中断睡眠
+        d_count = sum(1 for line in lines if 'D' in line and ' ' in line)
+
+        if d_count > 0:
+            suggestions.append(f"检测到 {d_count} 个不可中断睡眠线程，可能阻塞在I/O操作。")
+
+        # 检查睡眠线程占比
+        s_count = sum(1 for line in lines if 'S' in line and ' ' in line)
+        if thread_count > 0:
+            sleep_ratio = (s_count / thread_count) * 100
+            if sleep_ratio > 90:
+                suggestions.append(f"大量线程处于睡眠状态 ({sleep_ratio:.1f}%)，可能存在线程设计问题。")
+
+        if not suggestions:
+            return '<p>线程运行状态良好，暂无特别优化建议。</p>'
+
+        return "<div class='suggestion'>" + "<p>" + "</p><p>".join(suggestions) + "</p></div>"
 
     def _generate_flamegraph_section(self): 
         """生成火焰图分析章节"""
