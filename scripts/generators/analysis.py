@@ -434,78 +434,291 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
         return suggestions_html
 
 
-class ThreadAnalysisGenerator(BaseHtmlGenerator):
-    """线程分析HTML生成器"""
+class LockAnalysisGenerator(BaseHtmlGenerator):
+    """锁分析HTML生成器 - 使用perf lock命令分析锁争用"""
 
     def generate(self) -> str:
-        return self._generate_threads_analysis_section()
+        return self._generate_lock_analysis_section()
 
-    def _generate_threads_analysis_section(self) -> str:
-        """生成线程与锁分析章节"""
-        content = self.get_file_content("app_threads.txt")
-        status_content = self.get_file_content("app_status.txt")
+    def _parse_lock_report(self, content: str) -> dict:
+        """解析perf lock report输出"""
+        result = {
+            'locks': [],
+            'total_count': 0,
+            'has_content': False,
+        }
+        
+        if not content or content == "N/A" or not content.strip():
+            return result
+        
+        result['has_content'] = True
+        lines = content.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            
+            # 跳过空行和表头
+            if not line or line.startswith('Name') or line.startswith('===') or line.startswith('Total') or line.startswith('Samples'):
+                continue
+            
+            # 解析锁信息行
+            # 格式: Name  %t   %m    Avg   wait_index  wait +  morsels  idx  contentions  call_site
+            # 例如: &inode->i_lock  0.01  100.00   0.00    0.00   0.00 +    0.00     1     1         0xffffffff81234567
+            parts = line.split()
+            if len(parts) >= 10:
+                try:
+                    lock_info = {
+                        'name': parts[0],
+                        'time_pct': float(parts[1]) if parts[1] != 'N/A' else 0,
+                        'avg_wait': float(parts[4]) if parts[4] != 'N/A' else 0,
+                        'contentions': int(parts[8]) if parts[8] != 'N/A' else 0,
+                        'call_site': parts[9] if len(parts) > 9 else '',
+                    }
+                    result['locks'].append(lock_info)
+                    result['total_count'] += 1
+                except (ValueError, IndexError):
+                    continue
+        
+        return result
 
-        if not content or content == "N/A":
+    def _parse_lock_contention(self, content: str) -> dict:
+        """解析perf lock contention输出"""
+        result = {
+            'contentions': [],
+            'total': 0,
+        }
+        
+        if not content or content == "N/A" or not content.strip():
+            return result
+        
+        lines = content.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            
+            # 跳过空行和表头
+            if not line or line.startswith('Name') or line.startswith('==='):
+                continue
+            
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    contention = {
+                        'name': parts[0],
+                        'type': parts[1] if len(parts) > 1 else '',
+                        'calls': int(parts[2]) if parts[2].isdigit() else 0,
+                    }
+                    result['contentions'].append(contention)
+                    result['total'] += contention['calls']
+                except (ValueError, IndexError):
+                    continue
+        
+        return result
+
+    def _generate_lock_analysis_section(self) -> str:
+        """生成锁分析章节"""
+        lock_report = self.get_file_content("perf_lock.txt")
+        lock_contention = self.get_file_content("lock_contention.txt")
+
+        if not lock_report or lock_report == "N/A" or not lock_report.strip():
             return """
-        <section id="threads-analysis" class="card">
-            <h2>线程与锁分析</h2>
-            <div class="no-data">暂无线程数据</div>
+        <section id="lock-analysis" class="card">
+            <h2>锁分析</h2>
+            <div class="no-data">暂无锁分析数据（perf lock需要root权限）</div>
         </section>
             """
 
-        return f"""
-        <section id="threads-analysis" class="card">
-            <h2>线程与锁分析</h2>
+        # 解析锁数据
+        lock_data = self._parse_lock_report(lock_report)
+        contention_data = self._parse_lock_contention(lock_contention if lock_contention else lock_report)
 
-            <h3>线程统计</h3>
-            <table>
-                <tr><th>状态</th><th>数量</th><th>占比</th></tr>
-                {self._generate_thread_row(content, 'R', '运行中', 0)}
-                {self._generate_thread_row(content, 'S', '睡眠中', 0)}
-                {self._generate_thread_row(content, 'D', '不可中断', 0)}
-            </table>
+        if not lock_data['has_content'] or not lock_data['locks']:
+            return """
+        <section id="lock-analysis" class="card">
+            <h2>锁分析</h2>
+            <div class="no-data">锁分析数据为空或格式不支持</div>
+        </section>
+            """
 
-            <h3>线程分析</h3>
-            {self._generate_thread_suggestions(content, status_content)}
+        # 获取热点锁
+        hot_locks = sorted(lock_data['locks'], key=lambda x: x['contentions'], reverse=True)[:10]
+        critical_locks = [l for l in lock_data['locks'] if l['time_pct'] > 1.0][:5]
+
+        # 生成热点锁表格
+        hot_locks_table = self._generate_hot_locks_table(hot_locks)
+
+        # 生成分析建议
+        suggestions_html = self._generate_lock_suggestions(lock_data, contention_data)
+
+        html = f"""
+        <section id="lock-analysis" class="card">
+            <h2>锁分析</h2>
+            
+            <div class="grid">
+                <div class="stat-box">
+                    <div class="value">{lock_data['total_count']}</div>
+                    <div class="label">检测到的锁数量</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{contention_data['total']}</div>
+                    <div class="label">总争用次数</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{len(critical_locks)}</div>
+                    <div class="label">热点锁数量</div>
+                </div>
+            </div>
+"""
+
+        # 如果有热点锁，显示详细信息
+        if hot_locks:
+            html += f"""
+            <h3>锁争用排名 (Top 10)</h3>
+            {hot_locks_table}
+"""
+
+        # 添加完整的锁列表
+        if lock_data['locks']:
+            html += f"""
+            <h3>所有锁详情</h3>
+            <details>
+                <summary style="cursor:pointer;padding:10px;background:#f5f5f5;border-radius:5px;">
+                    点击展开完整锁列表 ({len(lock_data['locks'])} 个)
+                </summary>
+                <div style="margin-top:10px;max-height:400px;overflow-y:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>锁名称</th>
+                                <th>时间占比(%)</th>
+                                <th>平均等待(ms)</th>
+                                <th>争用次数</th>
+                                <th>调用点</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+"""
+            for lock in lock_data['locks']:
+                html += f"""
+                            <tr>
+                                <td style="word-break:break-all;">{lock['name']}</td>
+                                <td>{lock['time_pct']:.2f}</td>
+                                <td>{lock['avg_wait']:.2f}</td>
+                                <td>{lock['contentions']}</td>
+                                <td style="word-break:break-all;font-size:12px;">{lock['call_site']}</td>
+                            </tr>
+"""
+            html += """
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+"""
+
+        html += f"""
+            <h3>锁分析</h3>
+            {suggestions_html}
         </section>
         """
+        return html
 
-    def _generate_thread_row(self, content: str, state: str, label: str, offset: int) -> str:
-        """生成线程统计行"""
-        count = 0
-        if content and content != "N/A":
-            lines = content.split('\n')
-            for line in lines:
-                if state in line:
-                    count += 1
+    def _generate_hot_locks_table(self, hot_locks: list) -> str:
+        """生成热点锁表格"""
+        if not hot_locks:
+            return "<p>无热点锁数据</p>"
+        
+        rows = ""
+        for i, lock in enumerate(hot_locks, 1):
+            # 根据争用次数设置警告级别
+            warning_class = ""
+            if lock['contentions'] > 1000:
+                warning_class = "status error"
+            elif lock['contentions'] > 100:
+                warning_class = "status warning"
+            
+            rows += f"""
+                <tr>
+                    <td>{i}</td>
+                    <td style="word-break:break-all;">{lock['name']}</td>
+                    <td><span class="{warning_class}">{lock['contentions']}</span></td>
+                    <td>{lock['time_pct']:.2f}</td>
+                    <td>{lock['avg_wait']:.2f}</td>
+                </tr>
+"""
+        
+        return f"""
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>锁名称</th>
+                        <th>争用次数</th>
+                        <th>时间占比(%)</th>
+                        <th>平均等待(ms)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows}
+                </tbody>
+            </table>
+"""
 
-        total = count + offset
-        if total > 0:
-            percentage = (count / total) * 100
-            return f"<tr><td>{label} ({state})</td><td>{count}</td><td>{percentage:.1f}%</td></tr>"
-        return f"<tr><td>{label} ({state})</td><td>{count}</td><td>N/A</td></tr>"
-
-    def _generate_thread_suggestions(self, content: str, status_content: str) -> str:
-        """生成线程分析建议"""
+    def _generate_lock_suggestions(self, lock_data: dict, contention_data: dict) -> str:
+        """生成锁分析建议"""
         suggestions = []
-
-        lines = content.split('\n')
-        thread_count = sum(1 for line in lines if line.strip() and ' ' in line) - 1
-
-        if thread_count > 32:
-            suggestions.append(f"线程数量较多 ({thread_count}个)，可能增加上下文切换开销。")
-
-        d_count = sum(1 for line in lines if 'D' in line and ' ' in line)
-        if d_count > 0:
-            suggestions.append(f"检测到 {d_count} 个不可中断睡眠线程，可能阻塞在I/O操作。")
-
-        s_count = sum(1 for line in lines if 'S' in line and ' ' in line)
-        if thread_count > 0:
-            sleep_ratio = (s_count / thread_count) * 100
-            if sleep_ratio > 90:
-                suggestions.append(f"大量线程处于睡眠状态 ({sleep_ratio:.1f}%)，可能存在线程设计问题。")
-
+        
+        # 分析热点锁
+        hot_locks = sorted(lock_data['locks'], key=lambda x: x['contentions'], reverse=True)
+        
+        if hot_locks:
+            top_lock = hot_locks[0]
+            if top_lock['contentions'] > 1000:
+                suggestions.append(
+                    f"<strong>严重锁争用</strong>: 锁 <code>{top_lock['name']}</code> 争用次数达到 "
+                    f"{top_lock['contentions']:,} 次，是主要的性能瓶颈。建议优化锁的使用方式。"
+                )
+            elif top_lock['contentions'] > 100:
+                suggestions.append(
+                    f"<strong>存在锁争用</strong>: 锁 <code>{top_lock['name']}</code> 争用次数为 "
+                    f"{top_lock['contentions']} 次，建议关注。"
+                )
+        
+        # 分析高等待时间锁
+        long_wait_locks = [l for l in lock_data['locks'] if l['avg_wait'] > 10]
+        if long_wait_locks:
+            suggestions.append(
+                f"<strong>锁等待时间长</strong>: 检测到 {len(long_wait_locks)} 个锁的平均等待时间超过10ms，"
+                f"可能导致线程阻塞。建议检查锁持有时间和锁粒度。"
+            )
+        
+        # 分析高时间占比锁
+        time_locks = [l for l in lock_data['locks'] if l['time_pct'] > 5]
+        if time_locks:
+            suggestions.append(
+                f"<strong>高占用锁</strong>: {time_locks[0]['name']} 占用了 {time_locks[0]['time_pct']:.2f}% 的时间，"
+                f"需要重点优化。"
+            )
+        
+        # 性能优化建议
+        if lock_data['total_count'] > 50:
+            suggestions.append(
+                f"<strong>锁数量较多</strong>: 检测到 {lock_data['total_count']} 个不同的锁，"
+                f"建议评估是否可以合并或减少锁的使用。"
+            )
+        
+        # 通用优化建议
         if not suggestions:
-            return '<p>线程运行状态良好，暂无特别优化建议。</p>'
-
-        return "<div class='suggestion'>" + "<p>" + "</p><p>".join(suggestions) + "</p></div>"
+            suggestions.append("<strong>锁状态正常</strong>: 未检测到明显的锁争用问题。")
+        
+        # 添加通用优化建议
+        suggestions.append(
+            "<strong>优化建议</strong>: "
+            "1) 减少锁的持有时间 2) 减小锁的粒度 3) 使用读写锁替代互斥锁 "
+            "4) 考虑无锁数据结构 5) 避免在锁内执行耗时操作"
+        )
+        
+        suggestions_html = '<div class="suggestion"><ul>'
+        for s in suggestions:
+            suggestions_html += f'<li>{s}</li>'
+        suggestions_html += '</ul></div>'
+        return suggestions_html

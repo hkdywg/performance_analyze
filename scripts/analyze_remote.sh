@@ -570,8 +570,71 @@ collect_app_info() {
         # 进程IO使用 - 使用ps或/proc/io替代pidstat
         ssh_cmd "cat /proc/${APP_PID}/io 2>/dev/null || echo 'N/A'" > "${OUTPUT_DIR}/app_io.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_io.txt"
         
-        # 线程信息
-        ssh_cmd "ps -eLf -p ${APP_PID}" > "${OUTPUT_DIR}/app_threads.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_threads.txt"
+        # 线程信息 - 使用/proc/${APP_PID}/task/代替ps -eLf
+        ssh_cmd '
+            pid="'"${APP_PID}"'"
+            echo "TID  PPID   UID    STAT   COMMAND"
+            # 获取主线程信息
+            if [ -f "/proc/${pid}/stat" ]; then
+                stat=$(cat /proc/${pid}/stat 2>/dev/null)
+                # 解析stat文件: pid (comm) state ppid
+                tid=$(echo "$stat" | awk "{print \$1}")
+                comm=$(echo "$stat" | sed "s/.*(\([^)]*\)).*/\1/" | awk "{print \$1}")
+                state=$(echo "$stat" | awk "{print \$3}")
+                ppid=$(echo "$stat" | awk "{print \$4}")
+                # 映射状态码
+                case "$state" in
+                    R) stat_str="R" ;;
+                    S) stat_str="S" ;;
+                    D) stat_str="D" ;;
+                    Z) stat_str="Z" ;;
+                    T) stat_str="T" ;;
+                    t) stat_str="t" ;;
+                    X) stat_str="X" ;;
+                    x) stat_str="x" ;;
+                    K) stat_str="K" ;;
+                    W) stat_str="W" ;;
+                    P) stat_str="P" ;;
+                    *) stat_str="?" ;;
+                esac
+                printf "%-6d %-5d %-6d %-7s %s\n" "$tid" "$ppid" "0" "$stat_str" "$comm"
+            fi
+            # 获取所有线程信息
+            if [ -d "/proc/${pid}/task" ]; then
+                for tgid in $(ls -1 /proc/${pid}/task/ 2>/dev/null); do
+                    # 跳过主线程（已在上面处理）
+                    if [ "$tgid" != "$pid" ]; then
+                        if [ -f "/proc/${pid}/task/${tgid}/stat" ]; then
+                            tstat=$(cat /proc/${pid}/task/${tgid}/stat 2>/dev/null)
+                            ttid=$(echo "$tstat" | awk "{print \$1}")
+                            tcomm=$(echo "$tstat" | sed "s/.*(\([^)]*\)).*/\1/" | awk "{print \$1}")
+                            tstate=$(echo "$tstat" | awk "{print \$3}")
+                            tppid=$(echo "$tstat" | awk "{print \$4}")
+                            # 映射状态码
+                            case "$tstate" in
+                                R) tstat_str="R" ;;
+                                S) tstat_str="S" ;;
+                                D) tstat_str="D" ;;
+                                Z) tstat_str="Z" ;;
+                                T) tstat_str="T" ;;
+                                t) tstat_str="t" ;;
+                                X) tstat_str="X" ;;
+                                x) tstat_str="x" ;;
+                                K) tstat_str="K" ;;
+                                W) tstat_str="W" ;;
+                                P) tstat_str="P" ;;
+                                *) tstat_str="?" ;;
+                            esac
+                            printf "%-6d %-5d %-6d %-7s %s\n" "$ttid" "$tppid" "0" "$tstat_str" "$tcomm"
+                        fi
+                    fi
+                done
+            fi
+            # 统计线程数
+            thread_count=$(ls -1 /proc/${pid}/task/ 2>/dev/null | wc -l)
+            echo ""
+            echo "Total threads: $thread_count"
+        ' > "${OUTPUT_DIR}/app_threads.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_threads.txt"
         
         # 文件描述符
         ssh_cmd "ls -la /proc/${APP_PID}/fd 2>/dev/null | wc -l || echo "N/A"" > "${OUTPUT_DIR}/app_fds.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_fds.txt"
@@ -1311,6 +1374,81 @@ collect_drm_traces() {
 }
 
 #-------------------------------------------------------------------------------
+# 采集锁分析数据 (使用 perf lock)
+#-------------------------------------------------------------------------------
+collect_lock_analysis() {
+    log_info "采集锁分析数据..."
+
+    if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ] || [ "$APP_PID" = "" ]; then
+        log_warning "未找到目标进程PID，跳过锁分析"
+        echo "N/A" > "${OUTPUT_DIR}/perf_lock.txt"
+        echo "N/A" > "${OUTPUT_DIR}/lock_contention.txt"
+        return
+    fi
+
+    # 检查远程perf是否可用
+    local perf_available=$(ssh_cmd "which perf 2>/dev/null || echo 'not_found'" | tr -d '\r\n')
+    if [ "$perf_available" = "not_found" ]; then
+        log_warning "远程perf工具不可用，跳过锁分析"
+        echo "perf工具不可用" > "${OUTPUT_DIR}/perf_lock.txt"
+        echo "perf工具不可用" > "${OUTPUT_DIR}/lock_contention.txt"
+        return
+    fi
+
+    # 检查perf lock命令是否支持
+    local perf_lock_support=$(ssh_cmd "perf lock --help 2>/dev/null | head -5 || echo 'not_supported'" | tr -d '\r\n')
+    if [[ "$perf_lock_support" == *"not_supported"* ]] || [[ "$perf_lock_support" == *"unknown option"* ]]; then
+        log_warning "perf lock子命令不可用，跳过锁分析"
+        echo "perf lock子命令不可用" > "${OUTPUT_DIR}/perf_lock.txt"
+        echo "perf lock子命令不可用" > "${OUTPUT_DIR}/lock_contention.txt"
+        return
+    fi
+
+    log_info "使用perf lock record采集PID=${APP_PID}的锁争用信息..."
+
+    # 清理远程旧数据
+    ssh_cmd "rm -f /tmp/perf.data /tmp/perf.lock"
+
+    # 使用perf lock record采集数据
+    # -a: 整个系统
+    # -g: 记录调用栈
+    ssh_cmd "rm -f /tmp/perf.data && nohup sh -c 'perf lock record -a -g -o /tmp/perf.data -- sleep ${DURATION}' > /tmp/perf_lock.log 2>&1 &"
+    log_info "perf lock record正在后台运行..."
+
+    # 等待采集完成
+    sleep $((DURATION + 2))
+
+    # 检查是否采集成功
+    local perf_lock_exists=$(ssh_cmd "test -f /tmp/perf.data && echo 'yes' || echo 'no'" | tr -d '\r\n')
+    if [ "$perf_lock_exists" != "yes" ]; then
+        log_warning "perf lock record未能生成数据文件"
+        echo "采集失败" > "${OUTPUT_DIR}/perf_lock.txt"
+        echo "采集失败" > "${OUTPUT_DIR}/lock_contention.txt"
+        return
+    fi
+
+    # 生成锁分析报告
+    log_info "生成锁分析报告..."
+    
+    # perf lock report - 显示锁争用统计
+    ssh_cmd "perf lock report -i /tmp/perf.data 2>/dev/null" > "${OUTPUT_DIR}/perf_lock.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/perf_lock.txt"
+    
+    # perf lock contention - 显示锁争用情况
+    ssh_cmd "perf lock contention -i /tmp/perf.data 2>/dev/null | head -100" > "${OUTPUT_DIR}/lock_contention.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/lock_contention.txt"
+
+    # 获取锁统计摘要
+    local lock_summary=$(ssh_cmd "perf lock stat -i /tmp/perf.data 2>/dev/null | head -50" 2>/dev/null || echo "N/A")
+    if [ -n "$lock_summary" ] && [ "$lock_summary" != "N/A" ]; then
+        echo "$lock_summary" >> "${OUTPUT_DIR}/perf_lock.txt"
+        echo "" >> "${OUTPUT_DIR}/perf_lock.txt"
+        echo "=== Lock Contention Summary ===" >> "${OUTPUT_DIR}/perf_lock.txt"
+        cat "${OUTPUT_DIR}/lock_contention.txt" >> "${OUTPUT_DIR}/perf_lock.txt"
+    fi
+
+    log_success "锁分析数据采集完成"
+}
+
+#-------------------------------------------------------------------------------
 # 生成JSON汇总文件
 #-------------------------------------------------------------------------------
 generate_json_summary() {
@@ -1400,6 +1538,7 @@ main() {
 
     collect_app_info
     collect_flamegraph_data
+    collect_lock_analysis
     collect_system_load
 
     # 周期性采样 CPU 和内存（用于折线图）

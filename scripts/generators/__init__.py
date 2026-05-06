@@ -11,7 +11,7 @@ HTML生成器模块
 - chart: 图表生成器
 - flamegraph: 火焰图生成器
 - score: 评分生成器
-- analysis: I/O和线程分析生成器
+- analysis: I/O和锁分析生成器
 - proc_stat: 进程stat信息生成器
 """
 
@@ -22,7 +22,7 @@ from .compositor import CompositorGenerator
 from .chart import ChartGenerator
 from .flamegraph import FlamegraphGenerator
 from .score import ScoreGenerator
-from .analysis import IoAnalysisGenerator, ThreadAnalysisGenerator
+from .analysis import IoAnalysisGenerator, LockAnalysisGenerator
 from .proc_stat import ProcStatGenerator
 
 __all__ = [
@@ -34,6 +34,6 @@ __all__ = [
     'FlamegraphGenerator',
     'ScoreGenerator',
     'IoAnalysisGenerator',
-    'ThreadAnalysisGenerator',
+    'LockAnalysisGenerator',
     'ProcStatGenerator',
 ]
