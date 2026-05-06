@@ -753,7 +753,7 @@ collect_performance_samples() {
             # 格式: 时间,CPU%,RSS,VSZ,读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值
             echo "${current_time},${cpu_pct},${rss_mb},${vsz_mb},${read_rate},${write_rate},${read_mb},${write_mb},${syscr_diff},${syscw_diff}" >> "${OUTPUT_DIR}/io_samples.csv"
             
-            log_info "采样 ${iteration}/${sample_count}: CPU=${cpu_pct}%, RSS=${rss_mb}MB, IO读=${read_rate}KB/s, IO写=${write_rate}KB/s, 读调用差值=${syscr_diff}, 写调用差值=${syscw_diff}"
+            log_info "采样 ${iteration}/${sample_count}: CPU=${cpu_pct}%, RSS=${rss_mb}MB, IO读=${read_rate}KB/s, IO写=${write_rate}KB/s"
         else
             echo "${current_time},N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
             echo "${current_time},N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/io_samples.csv"
@@ -964,6 +964,10 @@ collect_flamegraph_data() {
 
     # 清理远程perf.data
     #ssh_cmd "rm -f /tmp/perf.data"
+
+    ssh_cmd "cat /proc/kallsyms > /tmp/kallsyms"
+    local perf_kernel_sym="${OUTPUT_DIR}/kallsyms"
+    scp_copy "/tmp/kallsyms" "$perf_kernel_sym"
 
     # 检查本地perf工具
     if command -v perf &> /dev/null; then
@@ -1193,7 +1197,7 @@ collect_flamegraph_data() {
     log_info "生成火焰图..."
 
     # 生成火焰图
-    if $perf_cmd script -i "$perf_data_local" 2>/dev/null | "${local_flamegraph}/stackcollapse-perf.pl" 2>/dev/null | "${local_flamegraph}/flamegraph.pl" --bgcolor='#1e1e2e' > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
+    if $perf_cmd script -i "$perf_data_local" --kallsyms="$perf_kernel_sym" 2>/dev/null | "${local_flamegraph}/stackcollapse-perf.pl" 2>/dev/null | "${local_flamegraph}/flamegraph.pl" --bgcolor='#1e1e2e' > "${OUTPUT_DIR}/perf_flamegraph.svg" 2>&1; then
         local svg_size=$(wc -c < "${OUTPUT_DIR}/perf_flamegraph.svg" 2>/dev/null || echo "0")
         if [ -n "$svg_size" ] && [ "$svg_size" -gt 1000 ]; then
             log_success "火焰图已生成，大小: ${svg_size} bytes"
