@@ -23,6 +23,7 @@ from .network import NetworkAnalyzer
 from .graphics import GraphicsAnalyzer
 from .flamegraph import FlamegraphAnalyzer
 from .syscall import SyscallAnalyzer
+from .proc_stat import ProcessStatAnalyzer
 
 __all__ = [
     'BaseAnalyzer',
@@ -36,4 +37,5 @@ __all__ = [
     'GraphicsAnalyzer',
     'FlamegraphAnalyzer',
     'SyscallAnalyzer',
+    'ProcessStatAnalyzer',
 ]

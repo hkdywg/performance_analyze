@@ -28,12 +28,13 @@ if str(SCRIPT_DIR) not in sys.path:
 from templates import HTML_HEADER, HTML_FOOTER, CHART_JS_SCRIPT, STACK_TOGGLE_SCRIPT
 from scripts.analyzers import (
     CpuAnalyzer, MemoryAnalyzer, IoAnalyzer, ThreadAnalyzer,
-    NetworkAnalyzer, GraphicsAnalyzer, FlamegraphAnalyzer, SyscallAnalyzer
+    NetworkAnalyzer, GraphicsAnalyzer, FlamegraphAnalyzer, SyscallAnalyzer,
+    ProcessStatAnalyzer
 )
 from scripts.generators import (
     SystemOverviewGenerator, AppPerformanceGenerator, CompositorGenerator,
     ChartGenerator, FlamegraphGenerator, ScoreGenerator,
-    IoAnalysisGenerator, ThreadAnalysisGenerator
+    IoAnalysisGenerator, ThreadAnalysisGenerator, ProcStatGenerator
 )
 
 
@@ -164,6 +165,13 @@ class PerformanceReportGenerator:
         self.issues.extend(syscall_analyzer.issues)
         self.suggestions.extend(syscall_analyzer.suggestions)
 
+        # 进程stat分析
+        proc_stat_analyzer = ProcessStatAnalyzer(self.data)
+        proc_stat_analyzer.analyze()
+        self.issues.extend(proc_stat_analyzer.issues)
+        self.suggestions.extend(proc_stat_analyzer.suggestions)
+        self.scores['ProcStat'] = proc_stat_analyzer.score()
+
         print(f"分析完成: 发现 {len(self.issues)} 个问题, {len(self.suggestions)} 条建议")
 
     def _calculate_total_score(self) -> float:
@@ -237,6 +245,10 @@ class PerformanceReportGenerator:
         gen = ThreadAnalysisGenerator(self.data, [], [])
         html += gen.generate()
 
+        # 进程stat信息
+        gen = ProcStatGenerator(self.data, [], [])
+        html += gen.generate()
+
         # 性能评分
         total_score = self._calculate_total_score()
         bottleneck = self._identify_bottleneck()
@@ -288,6 +300,7 @@ class PerformanceReportGenerator:
                 <li><a href="#flamegraph">火焰图与热点分析</a></li>
                 <li><a href="#io-analysis">I/O性能</a></li>
                 <li><a href="#threads-analysis">线程分析</a></li>
+                <li><a href="#proc-stat">进程Stat详情</a></li>
                 <li><a href="#suggestions">性能综合评估</a></li>
             </ul>
         </nav>

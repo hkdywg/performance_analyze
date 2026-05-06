@@ -558,6 +558,7 @@ collect_app_info() {
         
         # 进程详细信息
         ssh_cmd "cat /proc/${APP_PID}/status" > "${OUTPUT_DIR}/app_status.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_status.txt"
+        ssh_cmd "cat /proc/${APP_PID}/stat" > "${OUTPUT_DIR}/app_stat.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_stat.txt"
         ssh_cmd "cat /proc/${APP_PID}/smaps_rollup" > "${OUTPUT_DIR}/app_smaps.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/app_smaps.txt"
 
         # 进程CPU使用 - 使用top获取实时CPU和内存
