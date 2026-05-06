@@ -589,6 +589,7 @@ collect_app_info() {
 #-------------------------------------------------------------------------------
 # 周期性采样 CPU 和内存数据（用于折线图）
 # 优化：每次采样只执行一条 SSH 命令，提高效率和可靠性
+# 支持计算采样期间的 IO 差值而非累计值
 #-------------------------------------------------------------------------------
 collect_performance_samples() {
     log_info "开始周期性采样 CPU 和内存数据..."
@@ -604,8 +605,9 @@ collect_performance_samples() {
     
     if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ] || [ "$APP_PID" = "" ]; then
         log_warning "未找到目标进程PID，跳过采样"
-        echo "时间(s),CPU%,RSS(MB),VSZ(MB)" > "${OUTPUT_DIR}/perf_samples.csv"
-        echo "N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+        echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值" > "${OUTPUT_DIR}/perf_samples.csv"
+        echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值" > "${OUTPUT_DIR}/io_samples.csv"
+        echo "N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
         return
     fi
     
@@ -615,8 +617,9 @@ collect_performance_samples() {
     local proc_exists=$(ssh_cmd "test -d /proc/${APP_PID} && echo 'OK'" 2>&1 | tr -d '\r\n ')
     if [ "$proc_exists" != "OK" ]; then
         log_warning "进程 ${APP_PID} 不存在"
-        echo "时间(s),CPU%,RSS(MB),VSZ(MB)" > "${OUTPUT_DIR}/perf_samples.csv"
-        echo "N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+        echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值" > "${OUTPUT_DIR}/perf_samples.csv"
+        echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值" > "${OUTPUT_DIR}/io_samples.csv"
+        echo "N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
         return
     fi
     
@@ -624,15 +627,39 @@ collect_performance_samples() {
     local sample_count=$((DURATION / INTERVAL))
     [ "$sample_count" -lt 1 ] && sample_count=1
     
-    # 创建CSV文件 - 添加IO列
-    echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s)" > "${OUTPUT_DIR}/perf_samples.csv"
+    # 创建CSV文件 - 包含IO差值列
+    echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值" > "${OUTPUT_DIR}/perf_samples.csv"
+    echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值" > "${OUTPUT_DIR}/io_samples.csv"
 
     local elapsed=0
     local iteration=0
+    
+    # IO字节差值追踪
     local prev_read_bytes=0
     local prev_write_bytes=0
     local prev_time=0
-    local first_sample=1
+    
+    # IO系统调用差值追踪
+    local prev_syscr=0
+    local prev_syscw=0
+    local prev_syscr_time=0
+    
+    # 初始采样：获取基线数据
+    local baseline_io=$(ssh_cmd "cat /proc/${APP_PID}/io 2>/dev/null" 2>&1)
+    if [ -n "$baseline_io" ]; then
+        prev_read_bytes=$(echo "$baseline_io" | grep "^read_bytes:" | awk '{print $2}' | head -1)
+        prev_write_bytes=$(echo "$baseline_io" | grep "^write_bytes:" | awk '{print $2}' | head -1)
+        prev_syscr=$(echo "$baseline_io" | grep "^syscr:" | awk '{print $2}' | head -1)
+        prev_syscw=$(echo "$baseline_io" | grep "^syscw:" | awk '{print $2}' | head -1)
+        prev_time=0
+        prev_syscr_time=0
+    fi
+    
+    # 确保初始值为数字
+    prev_read_bytes=${prev_read_bytes:-0}
+    prev_write_bytes=${prev_write_bytes:-0}
+    prev_syscr=${prev_syscr:-0}
+    prev_syscw=${prev_syscw:-0}
 
     while [ "$elapsed" -lt "$DURATION" ]; do
         iteration=$((iteration + 1))
@@ -641,7 +668,8 @@ collect_performance_samples() {
         # 使用 top 获取 CPU% 和内存信息 (与 collect_app_info 一致)
         local top_line=$(ssh_cmd "top -b -n 1 | grep -E '^[[:space:]]*${APP_PID}'" 2>&1)
         local mem_info=$(ssh_cmd "cat /proc/${APP_PID}/status | grep -E 'VmRSS:|VmSize:'" 2>&1)
-        local io_info=$(ssh_cmd "cat /proc/${APP_PID}/io 2>/dev/null | grep -E 'read_bytes:|write_bytes:'" 2>&1)
+        # 获取完整的/proc/{pid}/io信息
+        local io_info=$(ssh_cmd "cat /proc/${APP_PID}/io 2>/dev/null" 2>&1)
 
         # 解析 top 输出: PID USER PR NI %CPU %MEM TIME+  COMMAND
         local cpu_val=$(echo "$top_line" | awk '{print $8}' | tr -d ' \r\n')
@@ -651,37 +679,66 @@ collect_performance_samples() {
         # 解析IO数据 - 使用 ^ 匹配行首避免匹配 cancelled_write_bytes
         local read_bytes=$(echo "$io_info" | grep "^read_bytes:" | awk '{print $2}' | head -1)
         local write_bytes=$(echo "$io_info" | grep "^write_bytes:" | awk '{print $2}' | head -1)
+        local rchar=$(echo "$io_info" | grep "^rchar:" | awk '{print $2}' | head -1)
+        local wchar=$(echo "$io_info" | grep "^wchar:" | awk '{print $2}' | head -1)
+        local syscr=$(echo "$io_info" | grep "^syscr:" | awk '{print $2}' | head -1)
+        local syscw=$(echo "$io_info" | grep "^syscw:" | awk '{print $2}' | head -1)
 
-        # 计算IO速率 (KB/s)
+        # 确保值为数字
+        read_bytes=${read_bytes:-0}
+        write_bytes=${write_bytes:-0}
+        syscr=${syscr:-0}
+        syscw=${syscw:-0}
+
+        # 计算IO字节速率 (KB/s)
         local read_rate="0"
         local write_rate="0"
-        if [ -n "$read_bytes" ] && [ -n "$write_bytes" ]; then
+        local time_diff=$((current_time - prev_time))
+        
+        if [ -n "$read_bytes" ] && [ -n "$write_bytes" ] && [ -n "$time_diff" ] && [ "$time_diff" -gt 0 ]; then
             # 确保是有效数字
-            if [[ "$read_bytes" =~ ^[0-9]+$ ]] && [[ "$write_bytes" =~ ^[0-9]+$ ]]; then
-                if [ "$first_sample" -eq 1 ]; then
-                    # 首次采样，只记录值不计算速率
-                    prev_read_bytes=$read_bytes
-                    prev_write_bytes=$write_bytes
-                    prev_time=$current_time
-                    first_sample=0
-                else
-                    local time_diff=$((current_time - prev_time))
-                    if [ "$time_diff" -gt 0 ] 2>/dev/null; then
-                        local read_diff=$((read_bytes - prev_read_bytes))
-                        local write_diff=$((write_bytes - prev_write_bytes))
-                        if [ "$read_diff" -ge 0 ] 2>/dev/null; then
-                            read_rate=$(echo "scale=2; $read_diff / 1024 / $time_diff" | bc 2>/dev/null || echo "0")
-                        fi
-                        if [ "$write_diff" -ge 0 ] 2>/dev/null; then
-                            write_rate=$(echo "scale=2; $write_diff / 1024 / $time_diff" | bc 2>/dev/null || echo "0")
-                        fi
-                        prev_read_bytes=$read_bytes
-                        prev_write_bytes=$write_bytes
-                        prev_time=$current_time
-                    fi
-                fi
+            if [[ "$read_bytes" =~ ^[0-9]+$ ]] && [[ "$write_bytes" =~ ^[0-9]+$ ]] && [[ "$prev_read_bytes" =~ ^[0-9]+$ ]] && [[ "$prev_write_bytes" =~ ^[0-9]+$ ]]; then
+                local read_diff=$((read_bytes - prev_read_bytes))
+                local write_diff=$((write_bytes - prev_write_bytes))
+                
+                # 处理可能的负值（进程重启或数据异常）
+                [ "$read_diff" -lt 0 ] && read_diff=0
+                [ "$write_diff" -lt 0 ] && write_diff=0
+                
+                # 计算速率
+                read_rate=$(echo "scale=2; $read_diff / 1024 / $time_diff" | bc 2>/dev/null || echo "0")
+                write_rate=$(echo "scale=2; $write_diff / 1024 / $time_diff" | bc 2>/dev/null || echo "0")
+                
+                prev_read_bytes=$read_bytes
+                prev_write_bytes=$write_bytes
+                prev_time=$current_time
             fi
         fi
+        
+        # 计算IO系统调用差值 (次)
+        local syscr_diff=0
+        local syscw_diff=0
+        local syscr_time_diff=$((current_time - prev_syscr_time))
+        
+        if [ -n "$syscr" ] && [ -n "$syscw" ] && [ -n "$syscr_time_diff" ] && [ "$syscr_time_diff" -gt 0 ]; then
+            # 确保是有效数字
+            if [[ "$syscr" =~ ^[0-9]+$ ]] && [[ "$syscw" =~ ^[0-9]+$ ]] && [[ "$prev_syscr" =~ ^[0-9]+$ ]] && [[ "$prev_syscw" =~ ^[0-9]+$ ]]; then
+                syscr_diff=$((syscr - prev_syscr))
+                syscw_diff=$((syscw - prev_syscw))
+                
+                # 处理可能的负值
+                [ "$syscr_diff" -lt 0 ] && syscr_diff=0
+                [ "$syscw_diff" -lt 0 ] && syscw_diff=0
+                
+                prev_syscr=$syscr
+                prev_syscw=$syscw
+                prev_syscr_time=$current_time
+            fi
+        fi
+
+        # 格式化累计IO值（转换为MB）
+        local read_mb=$(echo "scale=2; ${read_bytes:-0} / 1024 / 1024" | bc 2>/dev/null || echo "0")
+        local write_mb=$(echo "scale=2; ${write_bytes:-0} / 1024 / 1024" | bc 2>/dev/null || echo "0")
 
         # 验证数据有效性
         if [ -n "$rss_kb" ] && [ -n "$vsz_kb" ]; then
@@ -689,10 +746,17 @@ collect_performance_samples() {
             local vsz_mb=$(echo "scale=1; ${vsz_kb:-0} / 1024" | bc 2>/dev/null || echo "${vsz_kb}" | awk '{printf "%.1f", $1/1024}')
             local cpu_pct="${cpu_val:-0}"
 
+            # 写入 perf_samples.csv (简化版)
             echo "${current_time},${cpu_pct},${rss_mb},${vsz_mb},${read_rate},${write_rate}" >> "${OUTPUT_DIR}/perf_samples.csv"
-            log_info "采样 ${iteration}/${sample_count}: CPU=${cpu_pct}%, RSS=${rss_mb}MB, IO读=${read_rate}KB/s, IO写=${write_rate}KB/s"
+            
+            # 写入 io_samples.csv (包含IO系统调用差值)
+            # 格式: 时间,CPU%,RSS,VSZ,读IO(KB/s),写IO(KB/s),读字节累计,写字节累计,读调用差值,写调用差值
+            echo "${current_time},${cpu_pct},${rss_mb},${vsz_mb},${read_rate},${write_rate},${read_mb},${write_mb},${syscr_diff},${syscw_diff}" >> "${OUTPUT_DIR}/io_samples.csv"
+            
+            log_info "采样 ${iteration}/${sample_count}: CPU=${cpu_pct}%, RSS=${rss_mb}MB, IO读=${read_rate}KB/s, IO写=${write_rate}KB/s, 读调用差值=${syscr_diff}, 写调用差值=${syscw_diff}"
         else
-            echo "${current_time},N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+            echo "${current_time},N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+            echo "${current_time},N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/io_samples.csv"
             log_warning "第${iteration}次采样数据无效"
         fi
 
@@ -710,17 +774,109 @@ collect_performance_samples() {
 #-------------------------------------------------------------------------------
 collect_system_load() {
     log_info "采集系统负载信息..."
-    
-    # 系统负载
+
+    # 系统负载 - 使用 /proc 文件替代 vmstat
     ssh_cmd 'uptime' > "${OUTPUT_DIR}/uptime.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/uptime.txt"
-    ssh_cmd 'vmstat 1 5' > "${OUTPUT_DIR}/vmstat.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/vmstat.txt"
-    
+
+    # 从 /proc/stat 和 /proc/meminfo 生成类似 vmstat 的输出
+    # 正确解析各列：r b swpd free buff cache si so bi bo in cs us sy id wa st
+    ssh_cmd '
+        # 获取 CPU 时间和上下文切换信息
+        cpu_line=$(cat /proc/stat | head -1)
+        ct_line=$(cat /proc/stat | grep ctxt | head -1)
+        
+        # 解析 CPU 时间各字段 (user nice system idle iowait irq softirq steal guest guest_nice)
+        cpu_user=$(echo "$cpu_line" | awk "{print \$2}")
+        cpu_nice=$(echo "$cpu_line" | awk "{print \$3}")
+        cpu_system=$(echo "$cpu_line" | awk "{print \$4}")
+        cpu_idle=$(echo "$cpu_line" | awk "{print \$5}")
+        cpu_iowait=$(echo "$cpu_line" | awk "{print \$6}")
+        cpu_irq=$(echo "$cpu_line" | awk "{print \$7}")
+        cpu_softirq=$(echo "$cpu_line" | awk "{print \$8}")
+        
+        # 计算总 CPU 时间和 I/O 等待百分比
+        cpu_total=$((cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cpu_irq + cpu_softirq))
+        [ $cpu_total -eq 0 ] && cpu_total=1
+        
+        # I/O 等待是 iowait 占总 CPU 时间的百分比
+        io_wait=$(echo "scale=1; $cpu_iowait * 100 / $cpu_total" | bc 2>/dev/null || echo "0")
+        
+        # 计算用户/系统 CPU 百分比
+        cpu_usr_pct=$(echo "scale=1; ($cpu_user + $cpu_nice) * 100 / $cpu_total" | bc 2>/dev/null || echo "0")
+        cpu_sys_pct=$(echo "scale=1; $cpu_system * 100 / $cpu_total" | bc 2>/dev/null || echo "0")
+        cpu_idle_pct=$(echo "scale=1; $cpu_idle * 100 / $cpu_total" | bc 2>/dev/null || echo "0")
+
+        # 获取内存信息
+        mem_total=$(grep MemTotal: /proc/meminfo | awk "{print \$2}")
+        mem_free=$(grep MemFree: /proc/meminfo | awk "{print \$2}")
+        mem_available=$(grep MemAvailable: /proc/meminfo | awk "{print \$2}")
+        buffers=$(grep Buffers: /proc/meminfo | awk "{print \$2}")
+        cached=$(grep Cached: /proc/meminfo | grep -v SwapCached | awk "{print \$2}")
+        if [ -z "$cached" ]; then
+            cached=0
+        fi
+        swap_cached=$(grep SwapCached: /proc/meminfo | awk "{print \$2}")
+        [ -z "$swap_cached" ] && swap_cached=0
+        swap_total=$(grep SwapTotal: /proc/meminfo | awk "{print \$2}")
+        [ -z "$swap_total" ] && swap_total=0
+        swap_free=$(grep SwapFree: /proc/meminfo | awk "{print \$2}")
+        [ -z "$swap_free" ] && swap_free=0
+
+        # 计算已用 swap
+        swap_used=$((swap_total - swap_free))
+        
+        # 计算已用内存 (近似值)
+        used_mem=$((mem_total - mem_free - buffers - cached))
+        [ $used_mem -lt 0 ] && used_mem=0
+        
+        # 进程信息 - 运行中和阻塞的进程
+        procs_r=$(cat /proc/stat | grep "^procs_running" | awk "{print \$2}")
+        procs_b=$(cat /proc/stat | grep "^procs_blocked" | awk "{print \$2}")
+        [ -z "$procs_r" ] && procs_r=0
+        [ -z "$procs_b" ] && procs_b=0
+        
+        # 上下文切换和中断
+        ctxt=$(grep ctxt /proc/stat | awk "{print \$2}")
+        intr=$(grep intr /proc/stat | awk "{print \$2}")
+        [ -z "$ctxt" ] && ctxt=0
+        [ -z "$intr" ] && intr=0
+
+        # 输出格式类似 vmstat: procs r b swpd free buff cache si so bi bo in cs us sy id wa st
+        # 注意：wa列必须输出有效的0-100百分比值
+        printf "procs r  b    swpd   free   buff  cache   si   so    bi    bo   in    cs  us  sy  id  wa  st\n"
+        printf "%5d %-3d %-6d %6d %5d %6d    0    0    0     0 %5d %5d %3d %3d %3d %3d   0\n" \
+            "$procs_r" "$procs_b" "$swap_used" "$mem_free" "$buffers" "$cached" "$intr" "$ctxt" \
+            "${cpu_usr_pct%.*}" "${cpu_sys_pct%.*}" "${cpu_idle_pct%.*}" "${io_wait%.*}"
+    ' > "${OUTPUT_DIR}/vmstat.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/vmstat.txt"
+
     # top输出
     ssh_cmd 'top -b -n 1' > "${OUTPUT_DIR}/top.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/top.txt"
-    
-    # mpstat
-    ssh_cmd 'mpstat -P ALL 1 3' > "${OUTPUT_DIR}/mpstat.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/mpstat.txt"
-    
+
+    # mpstat - 使用 /proc/stat 替代
+    ssh_cmd '
+        echo "Linux kernel driver."
+        echo ""
+        echo "Average:      CPU   %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle"
+        cpu_line=$(cat /proc/stat | head -1)
+        total=$(echo "$cpu_line" | awk "{print \$2+\$3+\$4+\$5+\$6+\$7+\$8}")
+        idle=$(echo "$cpu_line" | awk "{print \$5}")
+        iowait=$(echo "$cpu_line" | awk "{print \$6}")
+        system=$(echo "$cpu_line" | awk "{print \$4}")
+        user=$(echo "$cpu_line" | awk "{print \$2}")
+        irq=$(echo "$cpu_line" | awk "{print \$7}")
+        soft=$(echo "$cpu_line" | awk "{print \$8}")
+
+        [ $total -eq 0 ] && total=1
+        usr_pct=$(echo "scale=1; $user * 100 / $total" | bc 2>/dev/null || echo "0")
+        sys_pct=$(echo "scale=1; $system * 100 / $total" | bc 2>/dev/null || echo "0")
+        iowait_pct=$(echo "scale=1; $iowait * 100 / $total" | bc 2>/dev/null || echo "0")
+        irq_pct=$(echo "scale=1; $irq * 100 / $total" | bc 2>/dev/null || echo "0")
+        soft_pct=$(echo "scale=1; $soft * 100 / $total" | bc 2>/dev/null || echo "0")
+        idle_pct=$(echo "scale=1; $idle * 100 / $total" | bc 2>/dev/null || echo "0")
+
+        echo "Average:    all  $usr_pct    0.00  $sys_pct   $iowait_pct   $irq_pct  $soft_pct    0.00    0.00    0.00 $idle_pct"
+    ' > "${OUTPUT_DIR}/mpstat.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/mpstat.txt"
+
     log_success "系统负载信息采集完成"
 }
 

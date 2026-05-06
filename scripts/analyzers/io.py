@@ -95,7 +95,7 @@ class IoAnalyzer(BaseAnalyzer):
         if not vmstat:
             return
 
-        wa = self._extract_number(vmstat, r"\d+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+")
+        wa = self._extract_wa_from_vmstat(vmstat)
         if wa and wa > 20:
             self.add_issue(
                 "warning",
@@ -134,7 +134,9 @@ class IoAnalyzer(BaseAnalyzer):
 
     def _analyze_io_samples(self) -> None:
         """分析采样CSV中的IO数据"""
-        csv_content = self.get_file_content("perf_samples.csv")
+        csv_content = self.get_file_content("io_samples.csv")
+        if not csv_content or csv_content == "N/A":
+            csv_content = self.get_file_content("perf_samples.csv")
         if not csv_content or csv_content == "N/A":
             return
 
@@ -149,6 +151,8 @@ class IoAnalyzer(BaseAnalyzer):
 
         read_rates = []
         write_rates = []
+        syscr_diffs = []  # 读系统调用差值
+        syscw_diffs = []  # 写系统调用差值
         times = []
 
         for line in lines[1:]:
@@ -167,6 +171,15 @@ class IoAnalyzer(BaseAnalyzer):
                     if write_rate != 'N/A' and write_rate != '':
                         write_rates.append(float(write_rate))
                     times.append(time)
+                    
+                    # 解析IO系统调用差值 (在第9和第10列)
+                    if len(parts) >= 10:
+                        syscr_diff = parts[8] if len(parts) > 8 else 'N/A'
+                        syscw_diff = parts[9] if len(parts) > 9 else 'N/A'
+                        if syscr_diff != 'N/A' and syscr_diff != '':
+                            syscr_diffs.append(int(syscr_diff))
+                        if syscw_diff != 'N/A' and syscw_diff != '':
+                            syscw_diffs.append(int(syscw_diff))
                 except (ValueError, IndexError):
                     continue
 
@@ -207,6 +220,33 @@ class IoAnalyzer(BaseAnalyzer):
                     "warning",
                     "检测到高I/O写入",
                     f"最大写入速率: {max_write/1024:.2f}MB/s，平均: {avg_write/1024:.2f}MB/s"
+                )
+        
+        # 分析IO系统调用差值
+        if syscr_diffs:
+            total_syscr_diff = sum(syscr_diffs)
+            max_syscr_diff = max(syscr_diffs)
+            avg_syscr_diff = total_syscr_diff / len(syscr_diffs) if syscr_diffs else 0
+            
+            if total_syscr_diff > 10000:
+                self.add_suggestion(
+                    "采样期间读系统调用频繁",
+                    f"采样期间总读系统调用次数: {total_syscr_diff:,}, 平均每次采样: {avg_syscr_diff:.1f}",
+                    "考虑使用缓冲I/O减少系统调用次数，或合并多次小读操作为一次大读操作。",
+                    "io"
+                )
+        
+        if syscw_diffs:
+            total_syscw_diff = sum(syscw_diffs)
+            max_syscw_diff = max(syscw_diffs)
+            avg_syscw_diff = total_syscw_diff / len(syscw_diffs) if syscw_diffs else 0
+            
+            if total_syscw_diff > 10000:
+                self.add_suggestion(
+                    "采样期间写系统调用频繁",
+                    f"采样期间总写系统调用次数: {total_syscw_diff:,}, 平均每次采样: {avg_syscw_diff:.1f}",
+                    "考虑使用缓冲写、批量写入或延迟写策略减少系统调用次数。",
+                    "io"
                 )
 
     def _check_io_operations(self) -> None:
@@ -344,9 +384,9 @@ class IoAnalyzer(BaseAnalyzer):
                 stats["cancelled_write_kb"] = f"{int(cancelled)/1024:.2f}"
 
         if vmstat:
-            wa = self._extract_number(vmstat, r"\d+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+")
+            wa = self._extract_wa_from_vmstat(vmstat)
             if wa is not None:
-                stats["io_wait"] = str(wa)
+                stats["io_wait"] = str(int(wa))
 
         # 从采样数据计算速率
         csv_content = self.get_file_content("perf_samples.csv")
@@ -435,3 +475,57 @@ class IoAnalyzer(BaseAnalyzer):
                     continue
 
         return samples
+
+    def _extract_wa_from_vmstat(self, vmstat: str) -> Optional[float]:
+        """
+        从 vmstat 输出中提取 I/O 等待时间百分比 (wa 列)
+        
+        vmstat 标准格式: procs r b swpd free buff cache si so bi bo in cs us sy id wa st
+        字段数: 17 (索引0-16)
+        
+        本脚本生成格式: "      0  0  0 643628 1432 28888    0    0     0     0     0     0   0   0  100   0   0"
+        分割后有18个字段，wa在索引16
+        
+        wa值应该是0-100的百分比，不是free列的1432
+        """
+        if not vmstat:
+            return None
+
+        lines = vmstat.strip().split('\n')
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # 跳过表头和数据行
+            if stripped.startswith('procs') or stripped.startswith('r '):
+                continue
+
+            fields = stripped.split()
+            
+            # 尝试多种列数情况
+            # 本脚本生成格式(18字段): wa在索引16
+            if len(fields) == 18:
+                try:
+                    wa = int(fields[16])
+                    # wa应该是0-100的百分比
+                    if 0 <= wa <= 100:
+                        return float(wa)
+                except (ValueError, IndexError):
+                    pass
+            # 标准vmstat格式(17字段): wa在索引15
+            elif len(fields) == 17:
+                try:
+                    wa = int(fields[15])
+                    if 0 <= wa <= 100:
+                        return float(wa)
+                except (ValueError, IndexError):
+                    pass
+            elif len(fields) >= 16:
+                try:
+                    wa = int(fields[15])
+                    if 0 <= wa <= 100:
+                        return float(wa)
+                except (ValueError, IndexError):
+                    pass
+
+        return None

@@ -48,8 +48,8 @@ class CpuAnalyzer(BaseAnalyzer):
         if not vmstat:
             return
 
-        # 解析vmstat的wa列（第5列）
-        wa = self._extract_number(vmstat, r"\d+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+")
+        # 从 vmstat 提取 wa 列（第16列）
+        wa = self._extract_wa_from_vmstat(vmstat)
         if wa and wa > 30:
             self.add_issue(
                 "warning",
@@ -76,3 +76,29 @@ class CpuAnalyzer(BaseAnalyzer):
                     score -= (cpu_match - 50)
 
         return max(0, min(100, score))
+
+    def _extract_wa_from_vmstat(self, vmstat: str):
+        """
+        从 vmstat 输出中提取 I/O 等待时间百分比 (wa 列)
+
+        vmstat 格式: procs r  b    swpd   free   buff  cache   si   so    bi    bo   in    cs  us  sy  id  wa  st
+        wa 是第16列（索引15）
+        """
+        if not vmstat:
+            return None
+
+        lines = vmstat.strip().split('\n')
+        for line in lines:
+            if not line.strip():
+                continue
+            if line.startswith('procs') or line.startswith('r '):
+                continue
+
+            fields = line.split()
+            if len(fields) >= 16:
+                try:
+                    return float(fields[15])
+                except (ValueError, IndexError):
+                    pass
+
+        return None

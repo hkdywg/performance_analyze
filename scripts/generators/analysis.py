@@ -65,6 +65,8 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
 
         read_rates = []
         write_rates = []
+        syscr_diffs = []  # 读系统调用差值
+        syscw_diffs = []  # 写系统调用差值
         times = []
 
         for line in lines[1:]:
@@ -82,10 +84,19 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
                         read_rates.append(read_rate)
                     if write_rate is not None and write_rate >= 0:
                         write_rates.append(write_rate)
+                    
+                    # 解析IO系统调用差值 (在第9和第10列)
+                    if len(parts) >= 10:
+                        syscr_diff = int(parts[8]) if parts[8] not in ['N/A', ''] else None
+                        syscw_diff = int(parts[9]) if parts[9] not in ['N/A', ''] else None
+                        if syscr_diff is not None and syscr_diff >= 0:
+                            syscr_diffs.append(syscr_diff)
+                        if syscw_diff is not None and syscw_diff >= 0:
+                            syscw_diffs.append(syscw_diff)
                 except (ValueError, IndexError):
                     continue
 
-        if not read_rates and not write_rates:
+        if not read_rates and not write_rates and not syscr_diffs and not syscw_diffs:
             return None
 
         return {
@@ -99,12 +110,26 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
             'total_read_kb': sum(read_rates),
             'total_write_kb': sum(write_rates),
             'sample_count': len(times),
+            # IO系统调用差值统计
+            'syscr_diffs': syscr_diffs,
+            'syscw_diffs': syscw_diffs,
+            'total_syscr_diff': sum(syscr_diffs) if syscr_diffs else 0,
+            'total_syscw_diff': sum(syscw_diffs) if syscw_diffs else 0,
+            'avg_syscr_diff': sum(syscr_diffs) / len(syscr_diffs) if syscr_diffs else 0,
+            'avg_syscw_diff': sum(syscw_diffs) / len(syscw_diffs) if syscw_diffs else 0,
+            'max_syscr_diff': max(syscr_diffs) if syscr_diffs else 0,
+            'max_syscw_diff': max(syscw_diffs) if syscw_diffs else 0,
         }
 
     def _generate_io_analysis_section(self) -> str:
         """生成I/O性能分析章节"""
+        # 优先使用 io_samples.csv（包含更多IO信息），其次使用 perf_samples.csv
+        io_csv_content = self.get_file_content("io_samples.csv")
+        if not io_csv_content or io_csv_content == "N/A":
+            io_csv_content = self.get_file_content("perf_samples.csv")
+        
+        csv_content = io_csv_content
         io_content = self.get_file_content("app_io.txt")
-        csv_content = self.get_file_content("perf_samples.csv")
         vmstat = self.get_file_content("vmstat.txt")
 
         if not io_content or io_content == "N/A":
@@ -131,6 +156,30 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
         # 判断IO模式
         io_mode = "读密集型" if rw_ratio > 5 else ("写密集型" if rw_ratio < 0.2 else "均衡型")
 
+        # 获取采样期间的IO统计
+        sampling_stats = ""
+        if io_rates:
+            sampling_stats = f"""
+            <div class="grid">
+                <div class="stat-box">
+                    <div class="value">{io_rates['sample_count']}</div>
+                    <div class="label">采样次数</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{io_rates['total_syscr_diff']:,}</div>
+                    <div class="label">采样读调用差值</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{io_rates['total_syscw_diff']:,}</div>
+                    <div class="label">采样写调用差值</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value">{io_rates['avg_syscr_diff']:.1f}</div>
+                    <div class="label">平均读调用/次</div>
+                </div>
+            </div>
+"""
+
         html = f"""
         <section id="io-analysis" class="card">
             <h2>I/O性能分析</h2>
@@ -148,12 +197,53 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
                     <div class="value">{io_wait}%</div>
                     <div class="label">系统I/O等待</div>
                 </div>
-                <div class="stat-box">
-                    <div class="value">{io_data.get('syscr', 'N/A')}</div>
-                    <div class="label">读系统调用</div>
-                </div>
             </div>
+"""
 
+        # 如果有采样数据，添加采样期间的IO统计
+        if sampling_stats:
+            html += f"""
+            <h3>采样期间I/O统计</h3>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>指标</th>
+                        <th>读取</th>
+                        <th>写入</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>采样期间系统调用总数</td>
+                        <td>{io_rates['total_syscr_diff']:,} 次</td>
+                        <td>{io_rates['total_syscw_diff']:,} 次</td>
+                    </tr>
+                    <tr>
+                        <td>平均每次采样调用</td>
+                        <td>{io_rates['avg_syscr_diff']:.1f} 次</td>
+                        <td>{io_rates['avg_syscw_diff']:.1f} 次</td>
+                    </tr>
+                    <tr>
+                        <td>最大单次采样调用</td>
+                        <td>{io_rates['max_syscr_diff']} 次</td>
+                        <td>{io_rates['max_syscw_diff']} 次</td>
+                    </tr>
+                    <tr>
+                        <td>平均IO速率</td>
+                        <td>{io_rates['avg_read']/1024:.2f} MB/s</td>
+                        <td>{io_rates['avg_write']/1024:.2f} MB/s</td>
+                    </tr>
+                    <tr>
+                        <td>峰值IO速率</td>
+                        <td>{io_rates['max_read']/1024:.2f} MB/s</td>
+                        <td>{io_rates['max_write']/1024:.2f} MB/s</td>
+                    </tr>
+                </tbody>
+            </table>
+"""
+
+        html += f"""
             <h3>进程I/O统计 (从启动至今累计)</h3>
             <table>
                 <thead>
@@ -213,38 +303,6 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
             </table>
 """
 
-        # 如果有采样数据，添加采样分析部分
-        if io_rates:
-            html += f"""
-            <h3>I/O采样分析 (采样{io_rates['sample_count']}次)</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>指标</th>
-                        <th>读取速率</th>
-                        <th>写入速率</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>平均速率</td>
-                        <td>{io_rates['avg_read']/1024:.2f} MB/s</td>
-                        <td>{io_rates['avg_write']/1024:.2f} MB/s</td>
-                    </tr>
-                    <tr>
-                        <td>峰值速率</td>
-                        <td>{io_rates['max_read']/1024:.2f} MB/s</td>
-                        <td>{io_rates['max_write']/1024:.2f} MB/s</td>
-                    </tr>
-                    <tr>
-                        <td>累计传输</td>
-                        <td>{io_rates['total_read_kb']/1024:.2f} MB</td>
-                        <td>{io_rates['total_write_kb']/1024:.2f} MB</td>
-                    </tr>
-                </tbody>
-            </table>
-"""
-
         # 添加优化建议
         html += self._generate_io_suggestions(io_data, io_rates, io_wait)
 
@@ -254,11 +312,59 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
         return html
 
     def _extract_io_wait(self, vmstat: str) -> str:
-        """提取I/O等待时间"""
+        """
+        提取I/O等待时间
+        
+        vmstat 标准格式: procs r b swpd free buff cache si so bi bo in cs us sy id wa st
+        字段数: 17 (索引0-16)
+        
+        本脚本生成格式: "      0  0  0 643628 1432 28888    0    0     0     0     0     0   0   0  100   0   0"
+        分割后有18个字段，wa在索引16
+        
+        wa值应该是0-100的百分比，不是free列的1432
+        """
         if not vmstat:
             return "N/A"
-        wa = self._extract_number(vmstat, r"\d+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+")
-        return str(wa) if wa else "N/A"
+        
+        lines = vmstat.strip().split('\n')
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # 跳过表头行
+            if stripped.startswith('procs') or stripped.startswith('r '):
+                continue
+                
+            fields = stripped.split()
+            
+            # 尝试多种列数情况
+            # 本脚本生成格式(18字段): wa在索引16
+            if len(fields) == 18:
+                try:
+                    wa = int(fields[16])
+                    # wa应该是0-100的百分比
+                    if 0 <= wa <= 100:
+                        return str(wa)
+                except (ValueError, IndexError):
+                    pass
+            # 标准vmstat格式(17字段): wa在索引15
+            elif len(fields) == 17:
+                try:
+                    wa = int(fields[15])
+                    if 0 <= wa <= 100:
+                        return str(wa)
+                except (ValueError, IndexError):
+                    pass
+            # 其他情况
+            elif len(fields) >= 16:
+                try:
+                    wa = int(fields[15])
+                    if 0 <= wa <= 100:
+                        return str(wa)
+                except (ValueError, IndexError):
+                    pass
+        
+        return "N/A"
 
     def _generate_io_suggestions(self, io_data: Dict, io_rates: Optional[Dict], io_wait: str) -> str:
         """生成I/O优化建议"""
@@ -283,15 +389,24 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
             if rw_ratio < 0.1:
                 suggestions.append("<strong>写密集型应用</strong>: 写入量远大于读取，考虑使用写缓存或延迟写策略。")
             elif rw_ratio > 10:
-                suggestions.append("<strong>读密集型应用</strong>: 读取量远大于写入，建议增加缓存提高读取性能。")
+                suggestions.append("<strong>读密集型应用</strong>: 读取量远大于读取，建议增加缓存提高读取性能。")
 
         # 累计IO量分析
         total_io = read_bytes + write_bytes
         if total_io > 1024 * 1024 * 1024:  # > 1GB
             suggestions.append(f"<strong>高I/O应用</strong>: 累计I/O量超过1GB ({total_io/1024/1024/1024:.2f}GB)，建议优化I/O模式或使用更快存储。")
 
-        # 采样峰值分析
+        # 采样期间IO系统调用差值分析
         if io_rates:
+            # 读系统调用差值分析
+            if io_rates['total_syscr_diff'] > 10000:
+                suggestions.append(f"<strong>采样期间读系统调用频繁</strong>: 共{io_rates['total_syscr_diff']:,}次，平均每次采样{io_rates['avg_syscr_diff']:.1f}次。建议使用缓冲I/O减少系统调用。")
+            
+            # 写系统调用差值分析
+            if io_rates['total_syscw_diff'] > 10000:
+                suggestions.append(f"<strong>采样期间写系统调用频繁</strong>: 共{io_rates['total_syscw_diff']:,}次，平均每次采样{io_rates['avg_syscw_diff']:.1f}次。建议使用缓冲写或批量写入。")
+
+            # IO速率峰值分析
             if io_rates['max_read'] > 50 * 1024:  # > 50MB/s
                 suggestions.append(f"<strong>高读取峰值</strong>: 检测到{io_rates['max_read']/1024:.1f}MB/s的读取峰值，考虑使用缓冲读取。")
             if io_rates['max_write'] > 20 * 1024:  # > 20MB/s
