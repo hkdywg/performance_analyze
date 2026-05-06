@@ -32,7 +32,7 @@ class CompositorGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="compositor" class="card">
-            <h2>2. Compositor状态 (Wayland/Weston)</h2>
+            <h2>Compositor状态 (Wayland/Weston)</h2>
 
             <div class="grid">
                 <div class="stat-box">
@@ -64,7 +64,7 @@ class CompositorGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="compositor" class="card">
-            <h2>2. DRM状态 (无Compositor)</h2>
+            <h2>DRM状态 (无Compositor)</h2>
 
             <h3>DRM设备节点</h3>
             <pre>{self._escape_html(drm_nodes[:1000]) if drm_nodes != 'N/A' else 'N/A'}</pre>

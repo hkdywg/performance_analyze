@@ -52,7 +52,7 @@ class FlamegraphGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="flamegraph" class="card">
-            <h2>4. 火焰图与热点分析</h2>
+            <h2>火焰图与热点分析</h2>
 
             <div class="grid">
                 <div class="stat-box">

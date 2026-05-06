@@ -63,7 +63,7 @@ class SystemOverviewGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="overview" class="card">
-            <h2>1. 系统概览</h2>
+            <h2>系统概览</h2>
 
             <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
                 <div class="stat-box">

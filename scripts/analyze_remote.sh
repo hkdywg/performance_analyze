@@ -624,44 +624,84 @@ collect_performance_samples() {
     local sample_count=$((DURATION / INTERVAL))
     [ "$sample_count" -lt 1 ] && sample_count=1
     
-    # 创建CSV文件
-    echo "时间(s),CPU%,RSS(MB),VSZ(MB)" > "${OUTPUT_DIR}/perf_samples.csv"
-    
+    # 创建CSV文件 - 添加IO列
+    echo "时间(s),CPU%,RSS(MB),VSZ(MB),读IO(KB/s),写IO(KB/s)" > "${OUTPUT_DIR}/perf_samples.csv"
+
     local elapsed=0
     local iteration=0
-    
+    local prev_read_bytes=0
+    local prev_write_bytes=0
+    local prev_time=0
+    local first_sample=1
+
     while [ "$elapsed" -lt "$DURATION" ]; do
         iteration=$((iteration + 1))
         local current_time=$((iteration * INTERVAL))
-        
+
         # 使用 top 获取 CPU% 和内存信息 (与 collect_app_info 一致)
         local top_line=$(ssh_cmd "top -b -n 1 | grep -E '^[[:space:]]*${APP_PID}'" 2>&1)
         local mem_info=$(ssh_cmd "cat /proc/${APP_PID}/status | grep -E 'VmRSS:|VmSize:'" 2>&1)
-        
+        local io_info=$(ssh_cmd "cat /proc/${APP_PID}/io 2>/dev/null | grep -E 'read_bytes:|write_bytes:'" 2>&1)
+
         # 解析 top 输出: PID USER PR NI %CPU %MEM TIME+  COMMAND
         local cpu_val=$(echo "$top_line" | awk '{print $8}' | tr -d ' \r\n')
         local rss_kb=$(echo "$mem_info" | grep "VmRSS:" | awk '{print $2}')
         local vsz_kb=$(echo "$mem_info" | grep "VmSize:" | awk '{print $2}')
-        
+
+        # 解析IO数据 - 使用 ^ 匹配行首避免匹配 cancelled_write_bytes
+        local read_bytes=$(echo "$io_info" | grep "^read_bytes:" | awk '{print $2}' | head -1)
+        local write_bytes=$(echo "$io_info" | grep "^write_bytes:" | awk '{print $2}' | head -1)
+
+        # 计算IO速率 (KB/s)
+        local read_rate="0"
+        local write_rate="0"
+        if [ -n "$read_bytes" ] && [ -n "$write_bytes" ]; then
+            # 确保是有效数字
+            if [[ "$read_bytes" =~ ^[0-9]+$ ]] && [[ "$write_bytes" =~ ^[0-9]+$ ]]; then
+                if [ "$first_sample" -eq 1 ]; then
+                    # 首次采样，只记录值不计算速率
+                    prev_read_bytes=$read_bytes
+                    prev_write_bytes=$write_bytes
+                    prev_time=$current_time
+                    first_sample=0
+                else
+                    local time_diff=$((current_time - prev_time))
+                    if [ "$time_diff" -gt 0 ] 2>/dev/null; then
+                        local read_diff=$((read_bytes - prev_read_bytes))
+                        local write_diff=$((write_bytes - prev_write_bytes))
+                        if [ "$read_diff" -ge 0 ] 2>/dev/null; then
+                            read_rate=$(echo "scale=2; $read_diff / 1024 / $time_diff" | bc 2>/dev/null || echo "0")
+                        fi
+                        if [ "$write_diff" -ge 0 ] 2>/dev/null; then
+                            write_rate=$(echo "scale=2; $write_diff / 1024 / $time_diff" | bc 2>/dev/null || echo "0")
+                        fi
+                        prev_read_bytes=$read_bytes
+                        prev_write_bytes=$write_bytes
+                        prev_time=$current_time
+                    fi
+                fi
+            fi
+        fi
+
         # 验证数据有效性
         if [ -n "$rss_kb" ] && [ -n "$vsz_kb" ]; then
             local rss_mb=$(echo "scale=1; ${rss_kb:-0} / 1024" | bc 2>/dev/null || echo "${rss_kb}" | awk '{printf "%.1f", $1/1024}')
             local vsz_mb=$(echo "scale=1; ${vsz_kb:-0} / 1024" | bc 2>/dev/null || echo "${vsz_kb}" | awk '{printf "%.1f", $1/1024}')
             local cpu_pct="${cpu_val:-0}"
-            
-            echo "${current_time},${cpu_pct},${rss_mb},${vsz_mb}" >> "${OUTPUT_DIR}/perf_samples.csv"
-            log_info "采样 ${iteration}/${sample_count}: CPU=${cpu_pct}%, RSS=${rss_mb}MB, VSZ=${vsz_mb}MB"
+
+            echo "${current_time},${cpu_pct},${rss_mb},${vsz_mb},${read_rate},${write_rate}" >> "${OUTPUT_DIR}/perf_samples.csv"
+            log_info "采样 ${iteration}/${sample_count}: CPU=${cpu_pct}%, RSS=${rss_mb}MB, IO读=${read_rate}KB/s, IO写=${write_rate}KB/s"
         else
-            echo "${current_time},N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
+            echo "${current_time},N/A,N/A,N/A,N/A,N/A" >> "${OUTPUT_DIR}/perf_samples.csv"
             log_warning "第${iteration}次采样数据无效"
         fi
-        
+
         elapsed=$((elapsed + INTERVAL))
         if [ "$elapsed" -lt "$DURATION" ]; then
             sleep "$INTERVAL"
         fi
     done
-    
+
     log_success "周期性采样完成，共 ${iteration} 次采样"
 }
 

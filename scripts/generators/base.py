@@ -129,7 +129,7 @@ class BaseHtmlGenerator(ABC):
 
         return f"""
         <section id="issues" class="card">
-            <h2>4. 问题诊断</h2>
+            <h2>问题诊断</h2>
             {issues_html}
         </section>
         """
