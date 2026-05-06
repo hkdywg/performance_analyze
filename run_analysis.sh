@@ -104,7 +104,7 @@ if [ $SKIP_REPORT -eq 0 ]; then
     echo -e "${BLUE}[STEP 2/2]${NC} 生成报告"
     echo -e "${BLUE}========================================${NC}"
 
-    python3 "${SCRIPT_DIR}/generate_report.py"
+    python3 "${SCRIPT_DIR}/report_generator.py"
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}[ERROR]${NC} 报告生成失败"

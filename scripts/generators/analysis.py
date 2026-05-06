@@ -21,7 +21,7 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
         if not io_content or io_content == "N/A":
             return """
         <section id="io-analysis" class="card">
-            <h2>10. I/O性能分析</h2>
+            <h2>7. I/O性能分析</h2>
             <div class="no-data">暂无I/O性能数据</div>
         </section>
             """
@@ -34,7 +34,7 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="io-analysis" class="card">
-            <h2>8. I/O性能分析</h2>
+            <h2>7. I/O性能分析</h2>
             <h3>应用程序I/O统计</h3>
             <table>
                 <tr><th>指标</th><th>值</th><th>评估</th></tr>
@@ -125,14 +125,14 @@ class ThreadAnalysisGenerator(BaseHtmlGenerator):
         if not content or content == "N/A":
             return """
         <section id="threads-analysis" class="card">
-            <h2>9. 线程与锁分析</h2>
+            <h2>8. 线程与锁分析</h2>
             <div class="no-data">暂无线程数据</div>
         </section>
             """
 
         return f"""
         <section id="threads-analysis" class="card">
-            <h2>9. 线程与锁分析</h2>
+            <h2>8. 线程与锁分析</h2>
 
             <h3>线程统计</h3>
             <table>

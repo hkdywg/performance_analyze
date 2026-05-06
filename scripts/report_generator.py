@@ -245,7 +245,7 @@ class PerformanceReportGenerator:
         html += gen.generate()
 
         # 优化建议
-        html += gen.generate_suggestions_section()
+        # html += gen.generate_suggestions_section()
 
         # JavaScript脚本
         html += CHART_JS_SCRIPT

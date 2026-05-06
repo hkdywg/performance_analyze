@@ -137,7 +137,21 @@ class BaseHtmlGenerator(ABC):
     def generate_suggestions_section(self) -> str:
         """生成优化建议部分"""
         if not self.suggestions:
-            return ""
+            suggestions_html = '<p class="no-data">暂无优化建议</p>'
+        else:
+            suggestions_html = ""
+            for sug in self.suggestions:
+                title = sug.get("title", "")
+                content = sug.get("content", "")
+                action = sug.get("action", "")
+
+                suggestions_html += f"""
+                <div class="suggestion">
+                    <h4>{title}</h4>
+                    {f'<p>{content}</p>' if content else ''}
+                    {f'<p>{action}</p>' if action else ''}
+                </div>
+                """
 
         suggestions_html = ""
         for sug in self.suggestions:
@@ -153,12 +167,6 @@ class BaseHtmlGenerator(ABC):
             </div>
             """
 
-        return f"""
-        <section id="suggestions" class="card">
-            <h2>11. 优化建议</h2>
-            {suggestions_html}
-        </section>
-        """
 
     def generate_footer(self) -> str:
         """生成页脚"""

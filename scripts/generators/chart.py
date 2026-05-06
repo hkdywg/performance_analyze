@@ -140,7 +140,7 @@ class ChartGenerator(BaseHtmlGenerator):
         if not has_cpu and not has_rss and not has_vsz:
             return """
         <section id="perf-chart" class="card">
-            <h2>3. 性能趋势</h2>
+            <h2>4. 性能趋势</h2>
             <div class="no-data">暂无性能数据，请运行采集脚本获取数据</div>
         </section>
             """
@@ -164,7 +164,7 @@ class ChartGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="perf-chart" class="card">
-            <h2>3. 性能趋势</h2>
+            <h2>4. 性能趋势</h2>
             {data_source_note}
 
             <div class="chart-container">
