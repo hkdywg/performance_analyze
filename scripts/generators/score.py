@@ -27,7 +27,7 @@ class ScoreGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="performance-score" class="card">
-            <h2>9. 性能综合评估</h2>
+            <h2>7. 性能综合评估</h2>
             <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
                 <div class="stat-box" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
                     <div class="value" style="font-size: 3em; color: white;">{self.total_score:.0f}</div>

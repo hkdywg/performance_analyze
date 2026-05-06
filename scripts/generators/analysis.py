@@ -34,7 +34,7 @@ class IoAnalysisGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="io-analysis" class="card">
-            <h2>7. I/O性能分析</h2>
+            <h2>5. I/O性能分析</h2>
             <h3>应用程序I/O统计</h3>
             <table>
                 <tr><th>指标</th><th>值</th><th>评估</th></tr>
@@ -125,7 +125,7 @@ class ThreadAnalysisGenerator(BaseHtmlGenerator):
         if not content or content == "N/A":
             return """
         <section id="threads-analysis" class="card">
-            <h2>8. 线程与锁分析</h2>
+            <h2>6. 线程与锁分析</h2>
             <div class="no-data">暂无线程数据</div>
         </section>
             """

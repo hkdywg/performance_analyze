@@ -80,7 +80,7 @@ class AppPerformanceGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="application" class="card">
-            <h2>3. 应用性能</h2>
+            <h2>2. 应用基础信息</h2>
 
             <div class="grid">
                 <div class="stat-box">

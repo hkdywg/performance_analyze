@@ -210,16 +210,16 @@ class PerformanceReportGenerator:
         html += gen.generate()
 
         # Compositor状态
-        gen = CompositorGenerator(self.data, [], [])
-        html += gen.generate()
+        # gen = CompositorGenerator(self.data, [], [])
+        # html += gen.generate()
 
         # 应用性能
         gen = AppPerformanceGenerator(self.data, [], [])
         html += gen.generate()
 
         # 问题诊断
-        gen = SystemOverviewGenerator(self.data, self.issues, self.suggestions)
-        html += gen.generate_issues_section()
+        # gen = SystemOverviewGenerator(self.data, self.issues, self.suggestions)
+        # html += gen.generate_issues_section()
 
         # 性能趋势图表
         gen = ChartGenerator(self.data, [], [])
@@ -269,11 +269,9 @@ class PerformanceReportGenerator:
         return f"""
         <div class="header">
             <h1>AR-HUD应用程序性能分析报告</h1>
-            <div class="subtitle">{app_name}</div>
             <div class="meta">
                 <div class="meta-item">主机: {host}</div>
-                <div class="meta-item">显示服务器: {server}</div>
-                <div class="meta-item">Compositor: {compositor}</div>
+                <div class="meta-item">应用: {app_name}</div>
                 <div class="meta-item">时间: {timestamp}</div>
             </div>
         </div>
@@ -285,14 +283,12 @@ class PerformanceReportGenerator:
         <nav class="nav">
             <ul>
                 <li><a href="#overview">系统概览</a></li>
-                <li><a href="#compositor">Compositor状态</a></li>
-                <li><a href="#application">应用性能</a></li>
-                <li><a href="#issues">问题诊断</a></li>
+                <li><a href="#application">应用基础信息</a></li>
                 <li><a href="#perf-chart">性能趋势</a></li>
-                <li><a href="#flamegraph">火焰图</a></li>
+                <li><a href="#flamegraph">火焰图与热点分析</a></li>
                 <li><a href="#io-analysis">I/O性能</a></li>
                 <li><a href="#threads-analysis">线程分析</a></li>
-                <li><a href="#suggestions">优化建议</a></li>
+                <li><a href="#suggestions">性能综合评估</a></li>
             </ul>
         </nav>
         """

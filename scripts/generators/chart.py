@@ -80,7 +80,7 @@ class ChartGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="perf-chart" class="card">
-            <h2>5. 性能趋势</h2>
+            <h2>3. 性能趋势</h2>
 
             <div class="chart-container">
                 <h3>应用性能趋势 (CPU、内存)</h3>
