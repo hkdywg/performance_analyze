@@ -99,6 +99,83 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
                         result[alias] = int(match.group(1))
         return result
 
+    def _parse_smaps_by_filetype(self, content: str, exe_path: str = None) -> Dict:
+        """
+        解析smaps，按文件类型统计RSS物理内存
+
+        通过解析/proc/{pid}/smaps，可以获取每个内存区域的：
+        - 文件路径
+        - 该区域的RSS物理内存占用
+
+        Args:
+            content: smaps文件内容
+            exe_path: 可执行文件路径（用于识别代码段）
+
+        Returns:
+            包含RssExe, RssLib, RssFile统计的字典（单位KB）
+        """
+        result = {
+            'rss_exe': 0,    # 代码段RSS
+            'rss_lib': 0,    # 共享库RSS
+            'rss_file': 0,   # 其他文件映射RSS
+        }
+
+        if not content:
+            return result
+
+        current_file = None
+        current_rss = 0
+
+        for line in content.split('\n'):
+            line = line.strip()
+
+            # 检测到新的内存区域开始（地址范围行）
+            if re.match(r'^[0-9a-fA-F]+-[0-9a-fA-F]+', line):
+                # 处理上一个区域的RSS
+                if current_file is not None and current_rss > 0:
+                    # 代码段：路径中包含可执行文件名
+                    is_exe = exe_path and exe_path.split('/')[-1] in current_file
+                    # 共享库：以.so结尾的文件（不包括包含.so的非库文件）
+                    is_shared_lib = current_file.endswith('.so') or bool(re.search(r'\.so\.[0-9.]+$', current_file))
+
+                    if is_exe:
+                        result['rss_exe'] += current_rss
+                    elif is_shared_lib:
+                        result['rss_lib'] += current_rss
+                    elif current_file:  # 非空路径且非可执行文件/共享库
+                        result['rss_file'] += current_rss
+
+                # 解析新区域的路径
+                current_file = None
+                current_rss = 0
+                parts = line.split()
+                if len(parts) >= 6:
+                    pathname = parts[5]
+                    if pathname and not pathname.startswith('['):
+                        current_file = pathname
+
+            # 检测到RSS行
+            elif line.startswith('Rss:'):
+                match = re.search(r':\s*(\d+)', line)
+                if match:
+                    current_rss = int(match.group(1))
+
+        # 处理最后一个区域
+        if current_file is not None and current_rss > 0:
+            # 代码段：路径中包含可执行文件名
+            is_exe = exe_path and exe_path.split('/')[-1] in current_file
+            # 共享库：以.so结尾的文件
+            is_shared_lib = current_file.endswith('.so') or bool(re.search(r'\.so\.[0-9.]+$', current_file))
+
+            if is_exe:
+                result['rss_exe'] += current_rss
+            elif is_shared_lib:
+                result['rss_lib'] += current_rss
+            elif current_file:  # 非空路径且非可执行文件/共享库
+                result['rss_file'] += current_rss
+
+        return result
+
     def _parse_vmstat(self, content: str) -> Dict:
         result = {}
         lines = content.strip().split('\n')
@@ -268,6 +345,11 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
         vm_peak_kb = proc_mem.get('VmPeak', 0)
         rss_anon = proc_mem.get('RssAnon', 0)
         rss_file = proc_mem.get('RssFile', 0)
+        rss_shmem = proc_mem.get('RssShmem', 0)
+        
+        # 如果RssFile为0，使用RSS - RssAnon - RssShmem估算
+        if rss_file == 0 and vm_rss_kb > 0:
+            rss_file = max(0, vm_rss_kb - rss_anon - rss_shmem)
 
         # 计算目标进程占系统内存的比例
         proc_mem_pct = (vm_rss_kb / total_kb * 100) if total_kb > 0 else 0
@@ -305,12 +387,13 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
         html += '</div>'
 
         # 进程内存饼图 - 显示包含关系
-        # RSS = RssAnon + RssFile
+        # RSS = RssAnon + RssFile + RssShmem
         #   RssAnon = Heap(堆) + Stack(栈) + 匿名mmap
-        #   RssFile = 代码段 + 共享库 + 文件映射
-        # 注意：VmData是虚拟空间大小，RssAnon是物理内存中的匿名部分，实际物理堆内存需要从smaps中获取
+        #   RssFile = 代码段 + 共享库 + 其他文件映射
+        #   RssShmem = 共享内存（System V IPC + mmap(MAP_SHARED)）
+        # 注意：VmData是虚拟空间大小，RssAnon是物理内存中的匿名部分
         
-        total_rss = rss_anon + rss_file
+        total_rss = rss_anon + rss_file + rss_shmem
         pie_labels = []
         pie_values = []
         pie_colors = []
@@ -404,16 +487,59 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
             # 匿名mmap（除了堆和栈以外的匿名内存）
             anon_mmap_rss_kb = max(0, rss_anon - heap_rss_kb - stack_rss_kb)
             
-            # 代码段和共享库（属于RssFile）
+            # 代码段和共享库
+            # 通过解析/proc/{pid}/smaps获取实际的物理内存(RSS)占用
             exe_kb = proc_mem.get('VmExe', 0)
             lib_kb = proc_mem.get('VmLib', 0)
             
-            # 其他文件映射
-            file_mmap_rss_kb = max(0, rss_file - exe_kb - lib_kb)
+            # 从smaps解析准确的物理内存占用
+            exe_rss_kb = 0
+            lib_rss_kb = 0
+            file_mmap_rss_kb = 0 
+            exe_path = None  # 用于调试
+            
+            if proc_detail and proc_detail != "N/A":
+                # 提取完整的smaps内容（每个区域的RSS）
+                in_smaps = False
+                smaps_content = ""
+                for line in proc_detail.split('\n'):
+                    if '=== Memory Smaps Full (for RSS analysis) ===' in line:
+                        in_smaps = True
+                        continue
+                    if in_smaps:
+                        if line.startswith('==='):
+                            break
+                        smaps_content += line + "\n"
+                
+                if smaps_content.strip():
+                    # 从maps中查找可执行文件路径（以进程名结尾的路径）
+                    exe_path = None
+                    comm_match = re.search(r'Name:\s*(\S+)', proc_detail)
+                    if comm_match:
+                        comm_name = comm_match.group(1)
+                        for line in proc_detail.split('\n'):
+                            # 跳过非maps行
+                            if line.startswith('===') or ':' not in line:
+                                continue
+                            parts = line.strip().split()
+                            if len(parts) >= 6:
+                                pathname = ' '.join(parts[5:])
+                                # 找到可执行文件（路径包含进程名，排除 [stack] 等特殊映射）
+                                if pathname and not pathname.startswith('[') and pathname.endswith(comm_name):
+                                    exe_path = pathname
+                                    break
+                    
+                    smaps_stats = self._parse_smaps_by_filetype(smaps_content, exe_path)
+                    exe_rss_kb = smaps_stats.get('rss_exe', 0)
+                    lib_rss_kb = smaps_stats.get('rss_lib', 0)
+                    smaps_file_rss = smaps_stats.get('rss_file', 0)
+                    
+                    # smaps解析的其他文件映射RSS（不含共享库和代码段）
+                    file_mmap_rss_kb = smaps_file_rss
             
             # 构建饼图数据 - 按包含关系组织
-            # 外层显示: 匿名映射(RssAnon) vs 文件映射(RssFile)
-            # 内层显示: 各子项
+            # 外层显示: 匿名映射(RssAnon) vs 文件映射(RssFile) - 来自status
+            # 内层显示: 各子项 - 来自smaps解析
             
             pie_outer_labels = ['匿名映射', '文件映射']
             pie_outer_values = [rss_anon, rss_file]
@@ -436,18 +562,18 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
                 pie_inner_labels.append('匿名mmap')
                 pie_inner_values.append(anon_mmap_rss_kb)
                 pie_inner_colors.append('#FFCD56')
-            if exe_kb > 0:
+            if exe_rss_kb > 0:
                 pie_inner_labels.append('代码段')
-                pie_inner_values.append(exe_kb)
+                pie_inner_values.append(exe_rss_kb)
                 pie_inner_colors.append('#36A2EB')
-            if lib_kb > 0:
+            if lib_rss_kb > 0:
                 pie_inner_labels.append('共享库')
-                pie_inner_values.append(lib_kb)
+                pie_inner_values.append(lib_rss_kb)
                 pie_inner_colors.append('#4BC0C0')
             if file_mmap_rss_kb > 0:
                 pie_inner_labels.append('文件映射')
                 pie_inner_values.append(file_mmap_rss_kb)
-                pie_inner_colors.append('#9966FF')
+                pie_inner_colors.append('#9B59B6')
             
             # 使用单一饼图，按比例显示各部分
             pie_labels = []
@@ -473,24 +599,31 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
                 pie_hover.append(f'匿名mmap: {self._format_kb(anon_mmap_rss_kb)} ⊆ 匿名映射(RssAnon)')
             
             # 文件映射部分
-            if exe_kb > 0:
-                pie_labels.append('代码段(VmExe)')
-                pie_values.append(exe_kb)
+            if exe_rss_kb > 0:
+                pie_labels.append('代码段')
+                pie_values.append(exe_rss_kb)
                 pie_colors.append('#36A2EB')
-                pie_hover.append(f'代码段(VmExe): {self._format_kb(exe_kb)} ⊆ 文件映射(RssFile)')
-            if lib_kb > 0:
-                pie_labels.append('共享库(VmLib)')
-                pie_values.append(lib_kb)
+                pie_hover.append(f'代码段: {self._format_kb(exe_rss_kb)} ⊆ 文件映射(RssFile)')
+            if lib_rss_kb > 0:
+                pie_labels.append('共享库')
+                pie_values.append(lib_rss_kb)
                 pie_colors.append('#4BC0C0')
-                pie_hover.append(f'共享库(VmLib): {self._format_kb(lib_kb)} ⊆ 文件映射(RssFile)')
+                pie_hover.append(f'共享库: {self._format_kb(lib_rss_kb)} ⊆ 文件映射(RssFile)')
             if file_mmap_rss_kb > 0:
-                pie_labels.append('其他文件映射')
+                pie_labels.append('文件映射')
                 pie_values.append(file_mmap_rss_kb)
-                pie_colors.append('#9966FF')
-                pie_hover.append(f'其他文件映射: {self._format_kb(file_mmap_rss_kb)} ⊆ 文件映射(RssFile)')
+                pie_colors.append('#9B59B6')
+                pie_hover.append(f'文件映射: {self._format_kb(file_mmap_rss_kb)} ⊆ 文件映射(RssFile)')
+            
+            # 共享内存部分
+            if rss_shmem > 0:
+                pie_labels.append('共享内存')
+                pie_values.append(rss_shmem)
+                pie_colors.append('#E74C3C')
+                pie_hover.append(f'共享内存(RssShmem): {self._format_kb(rss_shmem)}')
             
             html += '<h4>进程物理内存(RSS)分布</h4>'
-            html += '<p style="color:#666;font-size:12px;margin-bottom:10px;">包含关系: RSS = 匿名映射(RssAnon) + 文件映射(RssFile)</p>'
+            html += '<p style="color:#666;font-size:12px;margin-bottom:10px;">包含关系: RSS = RssAnon + RssFile + RssShmem</p>'
             html += '<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;">'
             html += '<div style="flex:1;min-width:280px;">'
             html += '<canvas id="procMemPieChart"></canvas>'
@@ -499,9 +632,10 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
             html += '<table style="width:100%;font-size:12px;">'
             
             # 父级说明
-            html += '<tr><td colspan="4" style="font-weight:bold;background:#e8e8e8;padding:5px;">RSS = RssAnon + RssFile</td></tr>'
+            html += '<tr><td colspan="4" style="font-weight:bold;background:#e8e8e8;padding:5px;">RSS = RssAnon + RssFile + RssShmem</td></tr>'
             html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#FF6384;border-radius:2px;"></span></td><td>匿名映射(RssAnon)</td><td>{self._format_kb(rss_anon)}</td><td>{rss_anon/total_rss*100:.1f}%</td></tr>'
             html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#36A2EB;border-radius:2px;"></span></td><td>文件映射(RssFile)</td><td>{self._format_kb(rss_file)}</td><td>{rss_file/total_rss*100:.1f}%</td></tr>'
+            html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#E74C3C;border-radius:2px;"></span></td><td>共享内存(RssShmem)</td><td>{self._format_kb(rss_shmem)}</td><td>{rss_shmem/total_rss*100:.1f}%</td></tr>'
             
             # 子项说明
             html += '<tr><td colspan="4" style="font-weight:bold;background:#f0f0f0;padding:5px;">子项明细 (⊆ 表示从属关系)</td></tr>'
@@ -517,15 +651,24 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
             
             # 文件映射的子项
             html += '<tr><td colspan="4" style="color:#36A2EB;font-size:11px;padding-left:15px;">⊆ 文件映射(RssFile)</td></tr>'
-            if exe_kb > 0:
-                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#36A2EB;border-radius:2px;"></span></td><td>代码段(VmExe)</td><td>{self._format_kb(exe_kb)}</td><td>{exe_kb/total_rss*100:.1f}%</td></tr>'
-            if lib_kb > 0:
-                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#4BC0C0;border-radius:2px;"></span></td><td>共享库(VmLib)</td><td>{self._format_kb(lib_kb)}</td><td>{lib_kb/total_rss*100:.1f}%</td></tr>'
+            if exe_rss_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#36A2EB;border-radius:2px;"></span></td><td>代码段</td><td>{self._format_kb(exe_rss_kb)}</td><td>{exe_rss_kb/total_rss*100:.1f}%</td></tr>'
+            if lib_rss_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#4BC0C0;border-radius:2px;"></span></td><td>共享库</td><td>{self._format_kb(lib_rss_kb)}</td><td>{lib_rss_kb/total_rss*100:.1f}%</td></tr>'
             if file_mmap_rss_kb > 0:
-                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#9966FF;border-radius:2px;"></span></td><td>其他文件映射</td><td>{self._format_kb(file_mmap_rss_kb)}</td><td>{file_mmap_rss_kb/total_rss*100:.1f}%</td></tr>'
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#9B59B6;border-radius:2px;"></span></td><td>其他文件映射</td><td>{self._format_kb(file_mmap_rss_kb)}</td><td>{file_mmap_rss_kb/total_rss*100:.1f}%</td></tr>'
+            
+            # 文件映射分解总和
+            file_mmap_sum = exe_rss_kb + lib_rss_kb + file_mmap_rss_kb
+            if file_mmap_sum > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#36A2EB;border-radius:2px;"></span></td><td>文件映射</td><td>{self._format_kb(file_mmap_sum)}</td><td>{file_mmap_sum/total_rss*100:.1f}%</td></tr>'
+            
+            # 调试信息：exe_path
+            html += f'<tr><td colspan="4" style="font-size:10px;color:#999;padding-left:15px;">exe_path: {exe_path or "N/A"}</td></tr>'
+            
+            # RssShmem是顶层类别，无子项（与RssAnon、RssFile同级）
             
             html += '</table>'
-            html += '<p style="font-size:11px;color:#888;margin-top:8px;">注: VmData是虚拟空间大小，与RssAnon物理占用不同</p>'
             html += '</div>'
             html += '</div>'
             

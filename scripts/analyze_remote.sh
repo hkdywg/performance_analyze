@@ -555,8 +555,8 @@ VMMAP_EOF
 
     # 内存映射详情
     echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
-    echo "=== Memory Maps (Top 50) ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
-    ssh_cmd "cat /proc/${pid}/maps 2>/dev/null | head -50" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+    echo "=== Memory Maps ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/maps 2>/dev/null" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
 
     # smaps_rollup - 内存统计汇总
     echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
@@ -567,6 +567,11 @@ VMMAP_EOF
     echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
     echo "=== Memory Regions Detail ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
     ssh_cmd "cat /proc/${pid}/smaps 2>/dev/null | grep -E '^[0-9a-f]' | head -30" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # 完整smaps数据（用于解析代码段/共享库/文件映射的RSS）
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== Memory Smaps Full (for RSS analysis) ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/smaps 2>/dev/null" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
 
     # PSS (Proportional Set Size) 内存分析
     echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
