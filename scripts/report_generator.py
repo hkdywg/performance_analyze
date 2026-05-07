@@ -34,7 +34,7 @@ from scripts.analyzers import (
 from scripts.generators import (
     SystemOverviewGenerator, AppPerformanceGenerator, CompositorGenerator,
     ChartGenerator, FlamegraphGenerator, ScoreGenerator,
-    IoAnalysisGenerator, LockAnalysisGenerator, ProcStatGenerator
+    IoAnalysisGenerator, LockAnalysisGenerator, MemoryAnalysisGenerator, ProcStatGenerator
 )
 
 
@@ -241,6 +241,10 @@ class PerformanceReportGenerator:
         gen = IoAnalysisGenerator(self.data, [], [])
         html += gen.generate()
 
+        # 内存分析
+        gen = MemoryAnalysisGenerator(self.data, [], [])
+        html += gen.generate()
+
         # 锁分析
         gen = LockAnalysisGenerator(self.data, [], [])
         html += gen.generate()
@@ -299,6 +303,7 @@ class PerformanceReportGenerator:
                 <li><a href="#perf-chart">性能趋势</a></li>
                 <li><a href="#flamegraph">火焰图与热点分析</a></li>
                 <li><a href="#io-analysis">I/O性能</a></li>
+                <li><a href="#memory-analysis">内存分析</a></li>
                 <li><a href="#lock-analysis">锁分析</a></li>
                 <li><a href="#proc-stat">进程Stat详情</a></li>
                 <li><a href="#suggestions">性能综合评估</a></li>

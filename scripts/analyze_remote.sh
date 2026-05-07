@@ -494,11 +494,112 @@ collect_system_info() {
 #-------------------------------------------------------------------------------
 collect_memory_info() {
     log_info "采集内存信息..."
-    
+
     ssh_cmd 'free -h' > "${OUTPUT_DIR}/memory.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/memory.txt"
     ssh_cmd 'cat /proc/meminfo' > "${OUTPUT_DIR}/meminfo.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/meminfo.txt"
-    
+
+    # 系统级内存分析
+    ssh_cmd 'vmstat 1 5' > "${OUTPUT_DIR}/vmstat.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/vmstat.txt"
+
+    # 内存分配详情
+    ssh_cmd 'cat /proc/buddyinfo' > "${OUTPUT_DIR}/buddyinfo.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/buddyinfo.txt"
+
+    # Slab内存使用
+    ssh_cmd 'cat /proc/slabinfo 2>/dev/null || cat /proc/meminfo | grep -E "SReclaimable:|SUnreclaim:"' > "${OUTPUT_DIR}/slab_info.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/slab_info.txt"
+
+    # Vmalloc使用
+    ssh_cmd 'cat /proc/vmstat | grep -E "pgalloc|pgfree|nr_" | head -50' > "${OUTPUT_DIR}/vmstat_detail.txt" 2>/dev/null || echo "N/A" > "${OUTPUT_DIR}/vmstat_detail.txt"
+
     log_success "内存信息采集完成"
+}
+
+#-------------------------------------------------------------------------------
+# 采集进程详细内存信息
+#-------------------------------------------------------------------------------
+collect_process_memory_detail() {
+    log_info "采集进程详细内存信息..."
+
+    if [ -z "$APP_PID" ] || [ "$APP_PID" = "N/A" ] || [ "$APP_PID" = "" ]; then
+        log_warning "未找到目标进程PID，跳过进程内存详情采集"
+        echo "N/A" > "${OUTPUT_DIR}/process_memory_detail.txt"
+        return
+    fi
+
+    local pid="$APP_PID"
+
+    # 进程内存状态概览
+    echo "=== Process Memory Status ===" > "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/status 2>/dev/null" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # 虚拟内存各字段说明
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== Virtual Memory Fields ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd 'cat << "VMMAP_EOF"
+VmPeak:  峰值虚拟内存大小
+VmSize:  当前虚拟内存大小
+VmLck:   已锁定的内存大小（mlock）
+VmPin:   固定内存大小
+VmRSS:   物理内存使用（常驻集大小）
+RssAnon: 匿名映射内存（堆、栈）
+RssFile: 文件映射内存（共享库、文件）
+RssShmem:共享内存
+VmData:  数据段大小（堆）
+VmStk:   栈大小
+VmExe:   代码段大小
+VmLib:   共享库大小
+VmPTE:   页表大小
+VmSwap:  交换到磁盘的内存
+VMMAP_EOF
+' >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # 内存映射详情
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== Memory Maps (Top 50) ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/maps 2>/dev/null | head -50" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # smaps_rollup - 内存统计汇总
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== Memory Smaps Rollup ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/smaps_rollup 2>/dev/null" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # 各内存区域的详细统计
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== Memory Regions Detail ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/smaps 2>/dev/null | grep -E '^[0-9a-f]' | head -30" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # PSS (Proportional Set Size) 内存分析
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== PSS Memory Analysis ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/smaps 2>/dev/null | grep -E 'Pss:|Rss:|Size:|Shared_Clean:|Shared_Dirty:|Private_Clean:|Private_Dirty:' | awk '{sum+=\$2} END {print \"Total Pss: \" sum \" KB\"}'" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # numa内存分布（如果支持）
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== NUMA Memory Info ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "cat /proc/${pid}/numa_maps 2>/dev/null | head -30 || echo 'N/A'" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # 页面大小信息
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== Page Size Info ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "getconf PAGESIZE 2>/dev/null || echo 'N/A'" >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    # clear_refs - 内存回收测试（可选）
+    echo "" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    echo "=== Memory Summary ===" >> "${OUTPUT_DIR}/process_memory_detail.txt"
+    ssh_cmd "
+        rss=\$(grep VmRSS /proc/${pid}/status 2>/dev/null | awk '{print \$2}')
+        rss_mb=\$(echo \"scale=2; \$rss/1024\" | bc 2>/dev/null || echo \"N/A\")
+        vsz=\$(grep VmSize /proc/${pid}/status 2>/dev/null | awk '{print \$2}')
+        vsz_mb=\$(echo \"scale=2; \$vsz/1024\" | bc 2>/dev/null || echo \"N/A\")
+        swap=\$(grep VmSwap /proc/${pid}/status 2>/dev/null | awk '{print \$2}')
+        swap_mb=\$(echo \"scale=2; \$swap/1024\" | bc 2>/dev/null || echo \"N/A\")
+        echo \"RSS: \$rss KB (\${rss_mb} MB)\"
+        echo \"VSZ: \$vsz KB (\${vsz_mb} MB)\"
+        echo \"Swap: \$swap KB (\${swap_mb} MB)\"
+        echo \"VSZ/RSS Ratio: \$(echo \"scale=2; \$vsz/\$rss\" | bc 2>/dev/null || echo \"N/A\")\"
+    " >> "${OUTPUT_DIR}/process_memory_detail.txt" 2>/dev/null
+
+    log_success "进程详细内存信息采集完成"
 }
 
 #-------------------------------------------------------------------------------
@@ -1537,6 +1638,7 @@ main() {
     fi
 
     collect_app_info
+    collect_process_memory_detail
     collect_flamegraph_data
     collect_lock_analysis
     collect_system_load

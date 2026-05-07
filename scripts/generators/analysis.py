@@ -15,6 +15,326 @@ from typing import Dict, List, Optional
 from .base import BaseHtmlGenerator
 
 
+
+class MemoryAnalysisGenerator(BaseHtmlGenerator):
+    """内存分析HTML生成器"""
+
+    VM_FIELDS = {
+        'VmPeak': ('峰值虚拟内存', 'KB'),
+        'VmSize': ('当前虚拟内存', 'KB'),
+        'VmLck': ('已锁定内存', 'KB'),
+        'VmPin': ('固定内存', 'KB'),
+        'VmRSS': ('物理内存使用', 'KB'),
+        'RssAnon': ('匿名映射内存', 'KB'),
+        'RssFile': ('文件映射内存', 'KB'),
+        'RssShmem': ('共享内存', 'KB'),
+        'VmData': ('数据段(堆)', 'KB'),
+        'VmStk': ('栈大小', 'KB'),
+        'VmExe': ('代码段', 'KB'),
+        'VmLib': ('共享库', 'KB'),
+        'VmPTE': ('页表大小', 'KB'),
+        'VmSwap': ('交换到磁盘', 'KB'),
+        'Threads': ('线程数', ''),
+        'FDSize': ('文件描述符数', ''),
+    }
+
+    def generate(self) -> str:
+        return self._generate_memory_analysis_section()
+
+    def _format_kb(self, kb: int) -> str:
+        if kb >= 1024 * 1024:
+            return f"{kb / 1024 / 1024:.2f} GB"
+        elif kb >= 1024:
+            return f"{kb / 1024:.2f} MB"
+        else:
+            return f"{kb} KB"
+
+    def _parse_meminfo(self, content: str) -> Dict:
+        result = {}
+        key_map = {
+            'MemTotal': 'total', 'MemFree': 'free', 'MemAvailable': 'available',
+            'Buffers': 'buffers', 'Cached': 'cached', 'SwapCached': 'swap_cached',
+            'Active': 'active', 'Inactive': 'inactive', 'SwapTotal': 'swap_total',
+            'SwapFree': 'swap_free', 'Dirty': 'dirty', 'Writeback': 'writeback',
+            'AnonPages': 'anon_pages', 'Mapped': 'mapped', 'Shmem': 'shmem',
+            'KReclaimable': 'reclaimable', 'SReclaimable': 's_reclaimable',
+            'SUnreclaim': 's_unreclaim',
+        }
+        for line in content.split('\n'):
+            for key, alias in key_map.items():
+                if line.startswith(key):
+                    match = re.search(r':\s*(\d+)', line)
+                    if match:
+                        result[alias] = int(match.group(1))
+        return result
+
+    def _parse_process_status(self, content: str) -> Dict:
+        result = {}
+        for line in content.split('\n'):
+            for field in self.VM_FIELDS.keys():
+                if line.startswith(field):
+                    match = re.search(r':\s*(\d+)', line)
+                    if match:
+                        result[field] = int(match.group(1))
+        return result
+
+    def _parse_smaps_rollup(self, content: str) -> Dict:
+        result = {}
+        key_map = {
+            'Rss': 'rss', 'Pss': 'pss', 'Pss_Anon': 'pss_anon',
+            'Pss_File': 'pss_file', 'Pss_Shmem': 'pss_shmem',
+            'Shared_Clean': 'shared_clean', 'Shared_Dirty': 'shared_dirty',
+            'Private_Clean': 'private_clean', 'Private_Dirty': 'private_dirty',
+            'Referenced': 'referenced', 'Anonymous': 'anonymous',
+            'LazyFree': 'lazy_free', 'AnonHugePages': 'anon_huge_pages',
+            'ShmemPmdMapped': 'shmem_pmd_mapped', 'Shared_Hugetlb': 'shared_hugetlb',
+            'Private_Hugetlb': 'private_hugetlb', 'Swap': 'swap',
+            'SwapPss': 'swap_pss', 'Locked': 'locked',
+        }
+        for line in content.split('\n'):
+            for key, alias in key_map.items():
+                if line.startswith(key):
+                    match = re.search(r':\s*(\d+)', line)
+                    if match:
+                        result[alias] = int(match.group(1))
+        return result
+
+    def _parse_vmstat(self, content: str) -> Dict:
+        result = {}
+        lines = content.strip().split('\n')
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('procs') or stripped.startswith('r '):
+                continue
+            fields = stripped.split()
+            if len(fields) >= 17:
+                try:
+                    result['r'] = int(fields[0])
+                    result['b'] = int(fields[1])
+                    result['swpd'] = int(fields[2])
+                    result['free'] = int(fields[3])
+                    result['buff'] = int(fields[4])
+                    result['cache'] = int(fields[5])
+                    result['si'] = int(fields[6])
+                    result['so'] = int(fields[7])
+                    result['bi'] = int(fields[8])
+                    result['bo'] = int(fields[9])
+                    result['us'] = int(fields[12]) if len(fields) > 12 else 0
+                    result['sy'] = int(fields[13]) if len(fields) > 13 else 0
+                    result['id'] = int(fields[14]) if len(fields) > 14 else 0
+                    result['wa'] = int(fields[15]) if len(fields) > 15 else 0
+                except (ValueError, IndexError):
+                    pass
+        return result
+
+    def _generate_memory_analysis_section(self) -> str:
+        meminfo = self.get_file_content("meminfo.txt")
+        proc_detail = self.get_file_content("process_memory_detail.txt")
+        vmstat = self.get_file_content("vmstat.txt")
+
+        if not meminfo or meminfo == "N/A":
+            return """<section id="memory-analysis" class="card">
+            <h2>内存分析</h2>
+            <div class="no-data">暂无内存数据</div>
+        </section>"""
+
+        sys_mem = self._parse_meminfo(meminfo)
+        vmstat_data = self._parse_vmstat(vmstat)
+        proc_mem = {}
+        smaps_rollup = None
+        pss_kb = 0
+
+        if proc_detail and proc_detail != "N/A":
+            proc_mem = self._parse_process_status(proc_detail)
+            smaps_section = ""
+            in_smaps = False
+            for line in proc_detail.split('\n'):
+                if '=== Memory Smaps Rollup ===' in line:
+                    in_smaps = True
+                    smaps_section = ""
+                    continue
+                if in_smaps:
+                    if line.startswith('==='):
+                        break
+                    smaps_section += line + "\n"
+            if smaps_section.strip():
+                smaps_rollup = self._parse_smaps_rollup(smaps_section)
+                pss_kb = smaps_rollup.get('pss', 0)
+            if pss_kb == 0:
+                for line in proc_detail.split('\n'):
+                    if 'Total Pss:' in line:
+                        match = re.search(r'Total Pss:\s*(\d+)', line)
+                        if match:
+                            pss_kb = int(match.group(1))
+
+        total_kb = sys_mem.get('total', 0)
+        free_kb = sys_mem.get('free', 0)
+        avail_kb = sys_mem.get('available', 0)
+        used_kb = total_kb - avail_kb
+        buffers_kb = sys_mem.get('buffers', 0)
+        cached_kb = sys_mem.get('cached', 0)
+        swap_total_kb = sys_mem.get('swap_total', 0)
+        swap_free_kb = sys_mem.get('swap_free', 0)
+        swap_used_kb = swap_total_kb - swap_free_kb
+        mem_usage_pct = (used_kb / total_kb * 100) if total_kb > 0 else 0
+
+        vm_rss_kb = proc_mem.get('VmRSS', 0)
+        vm_size_kb = proc_mem.get('VmSize', 0)
+        vm_data_kb = proc_mem.get('VmData', 0)
+        vm_swap_kb = proc_mem.get('VmSwap', 0)
+        vm_peak_kb = proc_mem.get('VmPeak', 0)
+        rss_anon = proc_mem.get('RssAnon', 0)
+        rss_file = proc_mem.get('RssFile', 0)
+
+        # 计算目标进程占系统内存的比例
+        proc_mem_pct = (vm_rss_kb / total_kb * 100) if total_kb > 0 else 0
+        vsz_rss_ratio = vm_size_kb / max(1, vm_rss_kb)
+        swap_usage_pct = (swap_used_kb / swap_total_kb * 100) if swap_total_kb > 0 else 0
+        s_reclaimable_kb = sys_mem.get('s_reclaimable', 0)
+
+        html = '<section id="memory-analysis" class="card">'
+        html += '<h2>内存分析</h2>'
+        html += '<h3>系统内存概览</h3>'
+        html += '<div class="grid">'
+        html += f'<div class="stat-box"><div class="value">{self._format_kb(total_kb)}</div><div class="label">物理内存总量</div></div>'
+        html += f'<div class="stat-box"><div class="value">{mem_usage_pct:.1f}%</div><div class="label">内存使用率</div></div>'
+        html += f'<div class="stat-box"><div class="value">{self._format_kb(avail_kb)}</div><div class="label">可用内存</div></div>'
+        html += f'<div class="stat-box"><div class="value">{self._format_kb(vm_rss_kb)}</div><div class="label">目标进程RSS</div></div>'
+        html += '</div>'
+
+        html += '<h3>系统内存使用分布</h3>'
+        html += '<table><thead><tr><th>类型</th><th>大小</th><th>说明</th></tr></thead><tbody>'
+        html += f'<tr><td>内核缓冲区</td><td>{self._format_kb(buffers_kb)}</td><td>块设备缓冲区</td></tr>'
+        html += f'<tr><td>页缓存</td><td>{self._format_kb(cached_kb)}</td><td>文件页缓存（包括共享库）</td></tr>'
+        html += f'<tr><td>SReclaimable</td><td>{self._format_kb(s_reclaimable_kb)}</td><td>可回收的Slab内存</td></tr>'
+        html += f'<tr><td>空闲内存</td><td>{self._format_kb(free_kb)}</td><td>完全空闲的内存</td></tr>'
+        if swap_total_kb > 0:
+            html += f'<tr><td>Swap已用/总量</td><td>{self._format_kb(swap_used_kb)} / {self._format_kb(swap_total_kb)}</td><td>使用率 {swap_usage_pct:.1f}%</td></tr>'
+        html += '</tbody></table>'
+
+        html += '<h3>目标进程内存占用</h3>'
+        html += f'<p style="color:#666;font-size:12px;margin-bottom:10px;">目标进程RSS占系统内存的 {proc_mem_pct:.1f}%</p>'
+        html += '<div class="grid">'
+        html += f'<div class="stat-box"><div class="value">{self._format_kb(vm_rss_kb)}</div><div class="label">物理内存 (RSS)</div></div>'
+        html += f'<div class="stat-box"><div class="value">{self._format_kb(vm_size_kb)}</div><div class="label">虚拟内存 (VSZ)</div></div>'
+        html += f'<div class="stat-box"><div class="value">{vsz_rss_ratio:.2f}x</div><div class="label">VSZ/RSS比率</div></div>'
+        html += f'<div class="stat-box"><div class="value">{self._format_kb(pss_kb)}</div><div class="label">PSS内存</div></div>'
+        html += '</div>'
+
+        html += '<h4>进程内存类型详解</h4>'
+        html += '<table><thead><tr><th>内存类型</th><th>当前值</th><th>说明</th></tr></thead><tbody>'
+        html += f'<tr><td>VmRSS</td><td>{self._format_kb(vm_rss_kb)}</td><td>物理内存使用（实际占用RAM）</td></tr>'
+        html += f'<tr><td>RssAnon</td><td>{self._format_kb(rss_anon)}</td><td>匿名映射内存（堆、栈等）</td></tr>'
+        html += f'<tr><td>RssFile</td><td>{self._format_kb(rss_file)}</td><td>文件映射内存（共享库、mmap文件）</td></tr>'
+        html += f'<tr><td>VmData</td><td>{self._format_kb(vm_data_kb)}</td><td>数据段大小（堆）</td></tr>'
+        html += f'<tr><td>VmStk</td><td>{self._format_kb(proc_mem.get("VmStk", 0))}</td><td>栈大小</td></tr>'
+        html += f'<tr><td>VmExe</td><td>{self._format_kb(proc_mem.get("VmExe", 0))}</td><td>代码段大小</td></tr>'
+        html += f'<tr><td>VmLib</td><td>{self._format_kb(proc_mem.get("VmLib", 0))}</td><td>共享库大小</td></tr>'
+        html += f'<tr><td>VmPeak</td><td>{self._format_kb(vm_peak_kb)}</td><td>峰值虚拟内存</td></tr>'
+        html += f'<tr><td>VmSwap</td><td>{self._format_kb(vm_swap_kb)}</td><td>交换到磁盘的内存</td></tr>'
+        html += f'<tr><td>VmLck</td><td>{self._format_kb(proc_mem.get("VmLck", 0))}</td><td>已锁定的内存（mlock）</td></tr>'
+        html += '</tbody></table>'
+
+        if smaps_rollup and pss_kb > 0:
+            private_clean = smaps_rollup.get('private_clean', 0)
+            private_dirty = smaps_rollup.get('private_dirty', 0)
+            shared_clean = smaps_rollup.get('shared_clean', 0)
+            shared_dirty = smaps_rollup.get('shared_dirty', 0)
+            swap_kb = smaps_rollup.get('swap', 0)
+            anon_huge = smaps_rollup.get('anon_huge_pages', 0)
+            html += '<h3>PSS内存详细分析</h3>'
+            html += '<p style="color:#666;font-size:12px;margin-bottom:10px;">PSS (Proportional Set Size): 按比例分摊共享库的内存，计算方式为：私有内存 + 共享内存/共享次数</p>'
+            html += '<table><thead><tr><th>类型</th><th>大小</th><th>说明</th></tr></thead><tbody>'
+            html += f'<tr><td>Total PSS</td><td>{self._format_kb(pss_kb)}</td><td>比例分摊后的总内存</td></tr>'
+            html += f'<tr><td>Private Clean</td><td>{self._format_kb(private_clean)}</td><td>私有干净内存（可回收）</td></tr>'
+            html += f'<tr><td>Private Dirty</td><td>{self._format_kb(private_dirty)}</td><td>私有脏内存（不可回收）</td></tr>'
+            html += f'<tr><td>Shared Clean</td><td>{self._format_kb(shared_clean)}</td><td>共享干净内存</td></tr>'
+            html += f'<tr><td>Shared Dirty</td><td>{self._format_kb(shared_dirty)}</td><td>共享脏内存</td></tr>'
+            html += f'<tr><td>Swap</td><td>{self._format_kb(swap_kb)}</td><td>换出到swap的内存</td></tr>'
+            if anon_huge > 0:
+                html += f'<tr><td>AnonHugePages</td><td>{self._format_kb(anon_huge)}</td><td>透明大页（THP）内存</td></tr>'
+            html += '</tbody></table>'
+
+        if vmstat_data:
+            html += '<h3>虚拟内存活动</h3>'
+            html += '<div class="grid">'
+            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("r", "N/A")}</div><div class="label">运行中进程</div></div>'
+            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("b", "N/A")}</div><div class="label">阻塞进程</div></div>'
+            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("si", 0)} KB/s</div><div class="label">Swap换入</div></div>'
+            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("so", 0)} KB/s</div><div class="label">Swap换出</div></div>'
+            html += '</div>'
+
+        html += self._generate_memory_suggestions(sys_mem, proc_mem, vmstat_data, smaps_rollup)
+        html += """        </section>
+        """
+        return html
+
+    def _generate_memory_suggestions(self, sys_mem: Dict, proc_mem: Dict, vmstat: Dict, smaps) -> str:
+        suggestions = []
+        total_kb = sys_mem.get('total', 0)
+        avail_kb = sys_mem.get('available', 0)
+        used_kb = total_kb - avail_kb
+        swap_used = sys_mem.get('swap_total', 0) - sys_mem.get('swap_free', 0)
+
+        if total_kb > 0:
+            usage_pct = (used_kb / total_kb) * 100
+            if usage_pct > 90:
+                suggestions.append(f"<strong>系统内存严重不足</strong>: 内存使用率已达{usage_pct:.1f}%，可用内存仅剩{avail_kb/1024:.0f}MB。建议增加物理内存或优化应用内存使用。")
+            elif usage_pct > 80:
+                suggestions.append(f"<strong>系统内存紧张</strong>: 内存使用率{usage_pct:.1f}%，建议关注内存泄漏风险。")
+
+        if swap_used > 0:
+            swap_total = sys_mem.get('swap_total', 0)
+            swap_pct = (swap_used / swap_total * 100) if swap_total > 0 else 0
+            if swap_pct > 50:
+                suggestions.append(f"<strong>Swap使用过多</strong>: 已使用{swap_used/1024:.0f}MB Swap ({swap_pct:.1f}%)，存在严重内存压力。")
+            else:
+                suggestions.append(f"<strong>使用Swap</strong>: 已使用{swap_used/1024:.0f}MB Swap，存在一定内存压力。")
+
+        vm_rss_kb = proc_mem.get('VmRSS', 0)
+        vm_size_kb = proc_mem.get('VmSize', 0)
+        vm_data_kb = proc_mem.get('VmData', 0)
+
+        if vm_rss_kb > 0 and total_kb > 0:
+            rss_pct = (vm_rss_kb / total_kb) * 100
+            if rss_pct > 50:
+                suggestions.append(f"<strong>进程内存占用过高</strong>: RSS占用{vm_rss_kb/1024:.0f}MB，达系统内存{rss_pct:.1f}%。")
+
+        if vm_size_kb > 0 and vm_rss_kb > 0:
+            vsz_rss_ratio = vm_size_kb / vm_rss_kb
+            if vsz_rss_ratio > 10:
+                suggestions.append(f"<strong>内存碎片化或预分配</strong>: VSZ/RSS比率高达{vsz_rss_ratio:.1f}x，存在大量虚拟内存但未实际使用。")
+
+        if vm_data_kb > 100 * 1024:
+            suggestions.append(f"<strong>堆内存较大</strong>: VmData={vm_data_kb/1024:.0f}MB，可能存在内存分配优化空间。")
+
+        if vmstat:
+            si = vmstat.get('si', 0)
+            so = vmstat.get('so', 0)
+            if si > 1000:
+                suggestions.append(f"<strong>频繁Swap换入</strong>: {si}KB/s 从Swap换入内存，可能存在内存不足。")
+            if so > 1000:
+                suggestions.append(f"<strong>频繁Swap换出</strong>: {so}KB/s 将内存换出到Swap，物理内存不足。")
+
+        if smaps:
+            private_dirty = smaps.get('private_dirty', 0)
+            swap = smaps.get('swap', 0)
+            if private_dirty > 50 * 1024:
+                suggestions.append(f"<strong>私有脏内存较多</strong>: {private_dirty/1024:.0f}MB 私有脏内存无法被回收，考虑优化数据结构。")
+            if swap > 10 * 1024:
+                suggestions.append(f"<strong>内存被换出</strong>: {swap/1024:.0f}MB 内存被换出到Swap，可能导致性能下降。")
+
+        if not suggestions:
+            suggestions.append("<strong>内存状态良好</strong>: 未检测到明显的内存问题。")
+        suggestions.append("<strong>优化建议</strong>: 1) 检查内存泄漏 2) 优化数据结构减少内存占用 3) 使用内存池 4) 及时释放不需要的内存 5) 考虑使用共享内存")
+
+        suggestions_html = '<div class="suggestion"><h4>内存优化建议</h4><ul>'
+        for s in suggestions:
+            suggestions_html += f'<li>{s}</li>'
+        suggestions_html += '</ul></div>'
+        return suggestions_html
+
+
 class IoAnalysisGenerator(BaseHtmlGenerator):
     """I/O性能分析HTML生成器"""
 
@@ -536,7 +856,7 @@ class LockAnalysisGenerator(BaseHtmlGenerator):
             return """
         <section id="lock-analysis" class="card">
             <h2>锁分析</h2>
-            <div class="no-data">锁分析数据为空或格式不支持</div>
+            <div class="no-data">锁分析数据为空或操作系统未开启LOCKDEP</div>
         </section>
             """
 

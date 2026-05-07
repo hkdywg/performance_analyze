@@ -22,7 +22,7 @@ from .compositor import CompositorGenerator
 from .chart import ChartGenerator
 from .flamegraph import FlamegraphGenerator
 from .score import ScoreGenerator
-from .analysis import IoAnalysisGenerator, LockAnalysisGenerator
+from .analysis import IoAnalysisGenerator, LockAnalysisGenerator, MemoryAnalysisGenerator
 from .proc_stat import ProcStatGenerator
 
 __all__ = [
@@ -35,5 +35,6 @@ __all__ = [
     'ScoreGenerator',
     'IoAnalysisGenerator',
     'LockAnalysisGenerator',
+    'MemoryAnalysisGenerator',
     'ProcStatGenerator',
 ]
