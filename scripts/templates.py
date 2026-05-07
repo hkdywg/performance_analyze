@@ -663,6 +663,87 @@ CHART_JS_SCRIPT = '''
                 }
             }
         }
+
+        // 内存映射饼图
+        if (typeof memoryPieData !== 'undefined' && memoryPieData.labels && memoryPieData.labels.length > 0) {
+            const pieCtx = document.getElementById('memoryPieChart');
+            if (pieCtx) {
+                new Chart(pieCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: memoryPieData.labels,
+                        datasets: [{
+                            data: memoryPieData.values,
+                            backgroundColor: memoryPieData.colors,
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: { boxWidth: 12, padding: 10, font: { size: 11 } }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                        const value = context.raw;
+                                        const pct = ((value / total) * 100).toFixed(1);
+                                        const mb = (value / 1024).toFixed(1);
+                                        return `${context.label}: ${mb} MB (${pct}%)`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        // 进程内存饼图 - 单一饼图显示各部分
+        if (typeof procMemPieData !== 'undefined' && procMemPieData.labels && procMemPieData.labels.length > 0) {
+            const procPieCtx = document.getElementById('procMemPieChart');
+            if (procPieCtx) {
+                new Chart(procPieCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: procMemPieData.labels,
+                        datasets: [{
+                            data: procMemPieData.values,
+                            backgroundColor: procMemPieData.colors,
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: {
+                                    boxWidth: 12,
+                                    padding: 8,
+                                    font: { size: 11 }
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                        const value = context.raw;
+                                        const pct = ((value / total) * 100).toFixed(1);
+                                        const mb = (value / 1024).toFixed(2);
+                                        return `${context.label}: ${mb} MB (${pct}%)`;
+                                    }
+                                }
+                            }
+                        },
+                        cutout: '40%',
+                    }
+                });
+            }
+        }
     });
     </script>
 '''

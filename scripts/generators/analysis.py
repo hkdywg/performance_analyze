@@ -127,6 +127,89 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
                     pass
         return result
 
+    def _parse_maps_classification(self, content: str) -> Dict:
+        """解析内存映射分类数据"""
+        result = {
+            'heap': 0,
+            'stack': 0,
+            'anonymous': 0,
+            'shared_lib': 0,
+            'file_map': 0,
+            'device': 0,
+            'vdso': 0,
+            'vsyscall': 0,
+            'vvar': 0,
+            'virtual_fs': 0,
+            'other': 0,
+            'major_regions': [],
+        }
+        if not content:
+            return result
+
+        lines = content.split('\n')
+        in_major_regions = False
+        for line in lines:
+            line = line.strip()
+            if '=== Major Memory Regions ===' in line:
+                in_major_regions = True
+                continue
+            if '===' in line and in_major_regions:
+                in_major_regions = False
+                continue
+
+            if in_major_regions:
+                if line:
+                    result['major_regions'].append(line)
+                continue
+
+            # 解析分类统计行
+            if line.startswith('Heap:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['heap'] = int(match.group(1))
+            elif line.startswith('Stack:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['stack'] = int(match.group(1))
+            elif line.startswith('Anonymous:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['anonymous'] = int(match.group(1))
+            elif line.startswith('Shared Libraries:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['shared_lib'] = int(match.group(1))
+            elif line.startswith('File Mappings:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['file_map'] = int(match.group(1))
+            elif line.startswith('Device Mappings:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['device'] = int(match.group(1))
+            elif line.startswith('VDSO:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['vdso'] = int(match.group(1))
+            elif line.startswith('VSyscall:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['vsyscall'] = int(match.group(1))
+            elif line.startswith('VVar:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['vvar'] = int(match.group(1))
+            elif line.startswith('Virtual FS:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['virtual_fs'] = int(match.group(1))
+            elif line.startswith('Other:'):
+                match = re.search(r'(\d+)', line)
+                if match:
+                    result['other'] = int(match.group(1))
+
+        return result
+
     def _generate_memory_analysis_section(self) -> str:
         meminfo = self.get_file_content("meminfo.txt")
         proc_detail = self.get_file_content("process_memory_detail.txt")
@@ -221,39 +304,264 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
         html += f'<div class="stat-box"><div class="value">{self._format_kb(pss_kb)}</div><div class="label">PSS内存</div></div>'
         html += '</div>'
 
-        html += '<h4>进程内存类型详解</h4>'
-        html += '<table><thead><tr><th>内存类型</th><th>当前值</th><th>说明</th></tr></thead><tbody>'
-        html += f'<tr><td>VmRSS</td><td>{self._format_kb(vm_rss_kb)}</td><td>物理内存使用（实际占用RAM）</td></tr>'
-        html += f'<tr><td>RssAnon</td><td>{self._format_kb(rss_anon)}</td><td>匿名映射内存（堆、栈等）</td></tr>'
-        html += f'<tr><td>RssFile</td><td>{self._format_kb(rss_file)}</td><td>文件映射内存（共享库、mmap文件）</td></tr>'
-        html += f'<tr><td>VmData</td><td>{self._format_kb(vm_data_kb)}</td><td>数据段大小（堆）</td></tr>'
-        html += f'<tr><td>VmStk</td><td>{self._format_kb(proc_mem.get("VmStk", 0))}</td><td>栈大小</td></tr>'
-        html += f'<tr><td>VmExe</td><td>{self._format_kb(proc_mem.get("VmExe", 0))}</td><td>代码段大小</td></tr>'
-        html += f'<tr><td>VmLib</td><td>{self._format_kb(proc_mem.get("VmLib", 0))}</td><td>共享库大小</td></tr>'
-        html += f'<tr><td>VmPeak</td><td>{self._format_kb(vm_peak_kb)}</td><td>峰值虚拟内存</td></tr>'
-        html += f'<tr><td>VmSwap</td><td>{self._format_kb(vm_swap_kb)}</td><td>交换到磁盘的内存</td></tr>'
-        html += f'<tr><td>VmLck</td><td>{self._format_kb(proc_mem.get("VmLck", 0))}</td><td>已锁定的内存（mlock）</td></tr>'
-        html += '</tbody></table>'
+        # 进程内存饼图 - 显示包含关系
+        # RSS = RssAnon + RssFile
+        #   RssAnon = Heap(堆) + Stack(栈) + 匿名mmap
+        #   RssFile = 代码段 + 共享库 + 文件映射
+        # 注意：VmData是虚拟空间大小，RssAnon是物理内存中的匿名部分，实际物理堆内存需要从smaps中获取
+        
+        total_rss = rss_anon + rss_file
+        pie_labels = []
+        pie_values = []
+        pie_colors = []
+        pie_hover_labels = []  # 显示详细说明
+        
+        if total_rss > 0:
+            # 获取实际堆的物理内存占用（从smaps解析）
+            heap_rss_kb = 0
+            stack_rss_kb = 0
+            anon_mmap_rss_kb = 0
+            code_rss_kb = 0
+            lib_rss_kb = 0
+            file_mmap_rss_kb = 0
+            
+            proc_detail = self.get_file_content("process_memory_detail.txt")
+            if proc_detail and proc_detail != "N/A":
+                # 从smaps rollup中获取详细分解
+                in_smaps = False
+                smaps_section = ""
+                for line in proc_detail.split('\n'):
+                    if '=== Memory Smaps Rollup ===' in line:
+                        in_smaps = True
+                        smaps_section = ""
+                        continue
+                    if in_smaps:
+                        if line.startswith('==='):
+                            break
+                        smaps_section += line + "\n"
+                
+                if smaps_section.strip():
+                    smaps_data = self._parse_smaps_rollup(smaps_section)
+                    private_anon = smaps_data.get('private_anon', 0)
+                    private_dirty = smaps_data.get('private_dirty', 0)
+                    shared_anon = smaps_data.get('shared_anon', 0)
+                    
+                    # 匿名映射的RSS = RssAnon
+                    # 但需要知道其中堆/栈/匿名mmap的具体分解
+                    # 这里使用比例估算，或从maps解析
+                    
+                # 从process_memory_detail.txt中解析heap/stack的实际RSS
+                # 格式类似: [heap]    1000    1000    4096    rw-p    00000000 00:00 0
+                current_start = None
+                current_end = None
+                current_perms = None
+                
+                for line in proc_detail.split('\n'):
+                    line = line.strip()
+                    if not line or line.startswith('===') or ':' not in line:
+                        continue
+                    
+                    # 解析 maps 格式: start-end perms offset dev inode pathname
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        addr_range = parts[0]
+                        perms = parts[1]
+                        pathname = ' '.join(parts[5:]) if len(parts) > 5 else ''
+                        
+                        if '[heap]' in pathname:
+                            # 这是堆，计算大小
+                            try:
+                                start, end = addr_range.split('-')
+                                size = int(end, 16) - int(start, 16)
+                                heap_rss_kb = size // 1024  # 虚拟大小近似RSS
+                            except:
+                                pass
+                        elif '[stack]' in pathname:
+                            try:
+                                start, end = addr_range.split('-')
+                                size = int(end, 16) - int(start, 16)
+                                stack_rss_kb = size // 1024
+                            except:
+                                pass
+                                
+                # 如果从maps无法获取，使用比例估算
+                # VmData包含堆，RssAnon是物理匿名内存
+                # 实际场景中：RssAnon ≈ 堆的物理占用 + 栈占用 + 匿名mmap
+                if heap_rss_kb == 0 and vm_data_kb > 0:
+                    # 估算：堆的物理占用通常远小于虚拟大小
+                    # 这里用RssAnon中除去栈的部分作为堆
+                    stack_kb = proc_mem.get('VmStk', 0)
+                    heap_rss_kb = max(0, rss_anon - stack_kb)
+            
+            # 如果还是没有heap数据，使用VmData作为上限
+            if heap_rss_kb == 0:
+                heap_rss_kb = vm_data_kb
+            
+            # 栈
+            if stack_rss_kb == 0:
+                stack_rss_kb = proc_mem.get('VmStk', 0)
+            
+            # 匿名mmap（除了堆和栈以外的匿名内存）
+            anon_mmap_rss_kb = max(0, rss_anon - heap_rss_kb - stack_rss_kb)
+            
+            # 代码段和共享库（属于RssFile）
+            exe_kb = proc_mem.get('VmExe', 0)
+            lib_kb = proc_mem.get('VmLib', 0)
+            
+            # 其他文件映射
+            file_mmap_rss_kb = max(0, rss_file - exe_kb - lib_kb)
+            
+            # 构建饼图数据 - 按包含关系组织
+            # 外层显示: 匿名映射(RssAnon) vs 文件映射(RssFile)
+            # 内层显示: 各子项
+            
+            pie_outer_labels = ['匿名映射', '文件映射']
+            pie_outer_values = [rss_anon, rss_file]
+            pie_outer_colors = ['#FF6384', '#36A2EB']
+            
+            # 内层显示分解
+            pie_inner_labels = []
+            pie_inner_values = []
+            pie_inner_colors = []
+            
+            if heap_rss_kb > 0:
+                pie_inner_labels.append('堆(Heap)')
+                pie_inner_values.append(heap_rss_kb)
+                pie_inner_colors.append('#FF6384')
+            if stack_rss_kb > 0:
+                pie_inner_labels.append('栈(Stack)')
+                pie_inner_values.append(stack_rss_kb)
+                pie_inner_colors.append('#FF9F40')
+            if anon_mmap_rss_kb > 0:
+                pie_inner_labels.append('匿名mmap')
+                pie_inner_values.append(anon_mmap_rss_kb)
+                pie_inner_colors.append('#FFCD56')
+            if exe_kb > 0:
+                pie_inner_labels.append('代码段')
+                pie_inner_values.append(exe_kb)
+                pie_inner_colors.append('#36A2EB')
+            if lib_kb > 0:
+                pie_inner_labels.append('共享库')
+                pie_inner_values.append(lib_kb)
+                pie_inner_colors.append('#4BC0C0')
+            if file_mmap_rss_kb > 0:
+                pie_inner_labels.append('文件映射')
+                pie_inner_values.append(file_mmap_rss_kb)
+                pie_inner_colors.append('#9966FF')
+            
+            # 使用单一饼图，按比例显示各部分
+            pie_labels = []
+            pie_values = []
+            pie_colors = []
+            pie_hover = []
+            
+            # 匿名映射部分
+            if heap_rss_kb > 0:
+                pie_labels.append('堆(Heap)')
+                pie_values.append(heap_rss_kb)
+                pie_colors.append('#FF6384')
+                pie_hover.append(f'堆(Heap): {self._format_kb(heap_rss_kb)} ⊆ 匿名映射(RssAnon)')
+            if stack_rss_kb > 0:
+                pie_labels.append('栈(Stack)')
+                pie_values.append(stack_rss_kb)
+                pie_colors.append('#FF9F40')
+                pie_hover.append(f'栈(Stack): {self._format_kb(stack_rss_kb)} ⊆ 匿名映射(RssAnon)')
+            if anon_mmap_rss_kb > 0:
+                pie_labels.append('匿名mmap')
+                pie_values.append(anon_mmap_rss_kb)
+                pie_colors.append('#FFCD56')
+                pie_hover.append(f'匿名mmap: {self._format_kb(anon_mmap_rss_kb)} ⊆ 匿名映射(RssAnon)')
+            
+            # 文件映射部分
+            if exe_kb > 0:
+                pie_labels.append('代码段(VmExe)')
+                pie_values.append(exe_kb)
+                pie_colors.append('#36A2EB')
+                pie_hover.append(f'代码段(VmExe): {self._format_kb(exe_kb)} ⊆ 文件映射(RssFile)')
+            if lib_kb > 0:
+                pie_labels.append('共享库(VmLib)')
+                pie_values.append(lib_kb)
+                pie_colors.append('#4BC0C0')
+                pie_hover.append(f'共享库(VmLib): {self._format_kb(lib_kb)} ⊆ 文件映射(RssFile)')
+            if file_mmap_rss_kb > 0:
+                pie_labels.append('其他文件映射')
+                pie_values.append(file_mmap_rss_kb)
+                pie_colors.append('#9966FF')
+                pie_hover.append(f'其他文件映射: {self._format_kb(file_mmap_rss_kb)} ⊆ 文件映射(RssFile)')
+            
+            html += '<h4>进程物理内存(RSS)分布</h4>'
+            html += '<p style="color:#666;font-size:12px;margin-bottom:10px;">包含关系: RSS = 匿名映射(RssAnon) + 文件映射(RssFile)</p>'
+            html += '<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;">'
+            html += '<div style="flex:1;min-width:280px;">'
+            html += '<canvas id="procMemPieChart"></canvas>'
+            html += '</div>'
+            html += '<div style="flex:1;min-width:280px;">'
+            html += '<table style="width:100%;font-size:12px;">'
+            
+            # 父级说明
+            html += '<tr><td colspan="4" style="font-weight:bold;background:#e8e8e8;padding:5px;">RSS = RssAnon + RssFile</td></tr>'
+            html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#FF6384;border-radius:2px;"></span></td><td>匿名映射(RssAnon)</td><td>{self._format_kb(rss_anon)}</td><td>{rss_anon/total_rss*100:.1f}%</td></tr>'
+            html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#36A2EB;border-radius:2px;"></span></td><td>文件映射(RssFile)</td><td>{self._format_kb(rss_file)}</td><td>{rss_file/total_rss*100:.1f}%</td></tr>'
+            
+            # 子项说明
+            html += '<tr><td colspan="4" style="font-weight:bold;background:#f0f0f0;padding:5px;">子项明细 (⊆ 表示从属关系)</td></tr>'
+            
+            # 匿名映射的子项
+            html += '<tr><td colspan="4" style="color:#FF6384;font-size:11px;padding-left:15px;">⊆ 匿名映射(RssAnon)</td></tr>'
+            if heap_rss_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#FF6384;border-radius:2px;"></span></td><td>堆(Heap)</td><td>{self._format_kb(heap_rss_kb)}</td><td>{heap_rss_kb/total_rss*100:.1f}%</td></tr>'
+            if stack_rss_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#FF9F40;border-radius:2px;"></span></td><td>栈(Stack)</td><td>{self._format_kb(stack_rss_kb)}</td><td>{stack_rss_kb/total_rss*100:.1f}%</td></tr>'
+            if anon_mmap_rss_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#FFCD56;border-radius:2px;"></span></td><td>匿名mmap</td><td>{self._format_kb(anon_mmap_rss_kb)}</td><td>{anon_mmap_rss_kb/total_rss*100:.1f}%</td></tr>'
+            
+            # 文件映射的子项
+            html += '<tr><td colspan="4" style="color:#36A2EB;font-size:11px;padding-left:15px;">⊆ 文件映射(RssFile)</td></tr>'
+            if exe_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#36A2EB;border-radius:2px;"></span></td><td>代码段(VmExe)</td><td>{self._format_kb(exe_kb)}</td><td>{exe_kb/total_rss*100:.1f}%</td></tr>'
+            if lib_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#4BC0C0;border-radius:2px;"></span></td><td>共享库(VmLib)</td><td>{self._format_kb(lib_kb)}</td><td>{lib_kb/total_rss*100:.1f}%</td></tr>'
+            if file_mmap_rss_kb > 0:
+                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#9966FF;border-radius:2px;"></span></td><td>其他文件映射</td><td>{self._format_kb(file_mmap_rss_kb)}</td><td>{file_mmap_rss_kb/total_rss*100:.1f}%</td></tr>'
+            
+            html += '</table>'
+            html += '<p style="font-size:11px;color:#888;margin-top:8px;">注: VmData是虚拟空间大小，与RssAnon物理占用不同</p>'
+            html += '</div>'
+            html += '</div>'
+            
+            # JavaScript数据
+            html += f'<script>var procMemPieData = {{labels: {pie_labels}, values: {pie_values}, colors: {pie_colors}, hoverLabels: {pie_hover}}};</script>'
 
+        # 详细字段表格
+        html += '<details style="margin-top:15px;"><summary style="cursor:pointer;padding:8px;background:#f5f5f5;border-radius:5px;">进程内存详细字段</summary>'
+        html += '<table style="width:100%;font-size:12px;margin-top:10px;"><thead><tr><th>类型</th><th>大小</th><th>说明</th></tr></thead><tbody>'
+        detail_items = [
+            ('VmRSS', vm_rss_kb, '物理内存使用（常驻集大小）'),
+            ('RssAnon', rss_anon, '匿名映射内存'),
+            ('RssFile', rss_file, '文件映射内存'),
+            ('VmData', vm_data_kb, '数据段大小（堆）'),
+            ('VmStk', proc_mem.get('VmStk', 0), '栈大小'),
+            ('VmExe', proc_mem.get('VmExe', 0), '代码段大小'),
+            ('VmLib', proc_mem.get('VmLib', 0), '共享库大小'),
+            ('VmPeak', vm_peak_kb, '峰值虚拟内存'),
+            ('VmSwap', vm_swap_kb, '交换到磁盘的内存'),
+        ]
+        for name, value, desc in detail_items:
+            if value > 0:
+                html += f'<tr><td>{name}</td><td>{self._format_kb(value)}</td><td style="color:#666;">{desc}</td></tr>'
+
+        # PSS额外信息
         if smaps_rollup and pss_kb > 0:
-            private_clean = smaps_rollup.get('private_clean', 0)
-            private_dirty = smaps_rollup.get('private_dirty', 0)
-            shared_clean = smaps_rollup.get('shared_clean', 0)
-            shared_dirty = smaps_rollup.get('shared_dirty', 0)
             swap_kb = smaps_rollup.get('swap', 0)
             anon_huge = smaps_rollup.get('anon_huge_pages', 0)
-            html += '<h3>PSS内存详细分析</h3>'
-            html += '<p style="color:#666;font-size:12px;margin-bottom:10px;">PSS (Proportional Set Size): 按比例分摊共享库的内存，计算方式为：私有内存 + 共享内存/共享次数</p>'
-            html += '<table><thead><tr><th>类型</th><th>大小</th><th>说明</th></tr></thead><tbody>'
-            html += f'<tr><td>Total PSS</td><td>{self._format_kb(pss_kb)}</td><td>比例分摊后的总内存</td></tr>'
-            html += f'<tr><td>Private Clean</td><td>{self._format_kb(private_clean)}</td><td>私有干净内存（可回收）</td></tr>'
-            html += f'<tr><td>Private Dirty</td><td>{self._format_kb(private_dirty)}</td><td>私有脏内存（不可回收）</td></tr>'
-            html += f'<tr><td>Shared Clean</td><td>{self._format_kb(shared_clean)}</td><td>共享干净内存</td></tr>'
-            html += f'<tr><td>Shared Dirty</td><td>{self._format_kb(shared_dirty)}</td><td>共享脏内存</td></tr>'
-            html += f'<tr><td>Swap</td><td>{self._format_kb(swap_kb)}</td><td>换出到swap的内存</td></tr>'
-            if anon_huge > 0:
-                html += f'<tr><td>AnonHugePages</td><td>{self._format_kb(anon_huge)}</td><td>透明大页（THP）内存</td></tr>'
-            html += '</tbody></table>'
+            if swap_kb > 0 or anon_huge > 0:
+                html += '<tr style="background:#f9f9f9;"><td colspan="3"><strong>PSS额外信息</strong></td></tr>'
+                if swap_kb > 0:
+                    html += f'<tr><td>Swap</td><td>{self._format_kb(swap_kb)}</td><td style="color:#666;">换出到swap的内存</td></tr>'
+                if anon_huge > 0:
+                    html += f'<tr><td>AnonHugePages</td><td>{self._format_kb(anon_huge)}</td><td style="color:#666;">透明大页（THP）内存</td></tr>'
+
+        html += '</tbody></table></details>'
 
         if vmstat_data:
             html += '<h3>虚拟内存活动</h3>'
