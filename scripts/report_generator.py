@@ -237,20 +237,20 @@ class PerformanceReportGenerator:
         gen = FlamegraphGenerator(self.data, [], [])
         html += gen.generate()
 
-        # I/O分析
-        gen = IoAnalysisGenerator(self.data, [], [])
+        # 进程CPU信息
+        gen = ProcStatGenerator(self.data, [], [])
         html += gen.generate()
 
         # 内存分析
         gen = MemoryAnalysisGenerator(self.data, [], [])
         html += gen.generate()
 
-        # 锁分析
-        gen = LockAnalysisGenerator(self.data, [], [])
+        # I/O分析
+        gen = IoAnalysisGenerator(self.data, [], [])
         html += gen.generate()
 
-        # 进程stat信息
-        gen = ProcStatGenerator(self.data, [], [])
+        # 锁分析
+        gen = LockAnalysisGenerator(self.data, [], [])
         html += gen.generate()
 
         # 性能评分
@@ -258,7 +258,7 @@ class PerformanceReportGenerator:
         bottleneck = self._identify_bottleneck()
         gen = ScoreGenerator(self.data, self.issues, self.suggestions,
                             self.scores, total_score, bottleneck)
-        html += gen.generate()
+        # html += gen.generate()
 
         # 优化建议
         # html += gen.generate_suggestions_section()
@@ -302,11 +302,10 @@ class PerformanceReportGenerator:
                 <li><a href="#application">应用基础信息</a></li>
                 <li><a href="#perf-chart">性能趋势</a></li>
                 <li><a href="#flamegraph">火焰图与热点分析</a></li>
-                <li><a href="#io-analysis">I/O性能</a></li>
+                <li><a href="#proc-stat">进程详情</a></li>
                 <li><a href="#memory-analysis">内存分析</a></li>
+                <li><a href="#io-analysis">I/O性能</a></li>
                 <li><a href="#lock-analysis">锁分析</a></li>
-                <li><a href="#proc-stat">进程Stat详情</a></li>
-                <li><a href="#suggestions">性能综合评估</a></li>
             </ul>
         </nav>
         """

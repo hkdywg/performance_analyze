@@ -140,7 +140,7 @@ class ProcStatGenerator(BaseHtmlGenerator):
         if not stat_content or stat_content == "N/A" or not stat_content.strip():
             return """
         <section id="proc-stat" class="card">
-            <h2>进程Stat信息</h2>
+            <h2>进程信息</h2>
             <p class="no-data">暂无进程stat数据</p>
         </section>
             """
@@ -149,7 +149,7 @@ class ProcStatGenerator(BaseHtmlGenerator):
         if not parsed:
             return """
         <section id="proc-stat" class="card">
-            <h2>进程Stat信息</h2>
+            <h2>进程信息</h2>
             <p class="no-data">无法解析进程stat数据</p>
         </section>
             """
@@ -195,7 +195,7 @@ class ProcStatGenerator(BaseHtmlGenerator):
 
         return f"""
         <section id="proc-stat" class="card">
-            <h2>进程Stat详细信息</h2>
+            <h2>进程详细信息</h2>
 
             <h3>CPU时间分析</h3>
             <table>
@@ -294,29 +294,6 @@ class ProcStatGenerator(BaseHtmlGenerator):
                         <td>最近运行CPU</td>
                         <td>{parsed.get('processor', 'N/A')}</td>
                         <td>最后执行时的CPU核心编号</td>
-                    </tr>
-                </tbody>
-            </table>
-
-            <h3>内存信息</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>指标</th>
-                        <th>值</th>
-                        <th>说明</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>虚拟内存大小</td>
-                        <td>{vsize_mb:.1f} MB</td>
-                        <td>进程虚拟地址空间大小</td>
-                    </tr>
-                    <tr>
-                        <td>物理内存 (RSS)</td>
-                        <td>{self._format_memory(rss_kb)}</td>
-                        <td>驻留集大小，实际使用的物理内存</td>
                     </tr>
                 </tbody>
             </table>
