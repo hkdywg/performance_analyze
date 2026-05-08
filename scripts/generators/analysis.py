@@ -609,7 +609,7 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
                 pie_values.append(lib_rss_kb)
                 pie_colors.append('#4BC0C0')
                 pie_hover.append(f'共享库: {self._format_kb(lib_rss_kb)} ⊆ 文件映射(RssFile)')
-            if file_mmap_rss_kb > 0:
+
                 pie_labels.append('文件映射')
                 pie_values.append(file_mmap_rss_kb)
                 pie_colors.append('#9B59B6')
@@ -651,17 +651,9 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
             
             # 文件映射的子项
             html += '<tr><td colspan="4" style="color:#36A2EB;font-size:11px;padding-left:15px;">⊆ 文件映射(RssFile)</td></tr>'
-            if exe_rss_kb > 0:
-                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#36A2EB;border-radius:2px;"></span></td><td>代码段</td><td>{self._format_kb(exe_rss_kb)}</td><td>{exe_rss_kb/total_rss*100:.1f}%</td></tr>'
-            if lib_rss_kb > 0:
-                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#4BC0C0;border-radius:2px;"></span></td><td>共享库</td><td>{self._format_kb(lib_rss_kb)}</td><td>{lib_rss_kb/total_rss*100:.1f}%</td></tr>'
-            if file_mmap_rss_kb > 0:
-                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#9B59B6;border-radius:2px;"></span></td><td>其他文件映射</td><td>{self._format_kb(file_mmap_rss_kb)}</td><td>{file_mmap_rss_kb/total_rss*100:.1f}%</td></tr>'
-            
-            # 文件映射分解总和
-            file_mmap_sum = exe_rss_kb + lib_rss_kb + file_mmap_rss_kb
-            if file_mmap_sum > 0:
-                html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#36A2EB;border-radius:2px;"></span></td><td>文件映射</td><td>{self._format_kb(file_mmap_sum)}</td><td>{file_mmap_sum/total_rss*100:.1f}%</td></tr>'
+            html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#36A2EB;border-radius:2px;"></span></td><td>代码段</td><td>{self._format_kb(exe_rss_kb)}</td><td>{exe_rss_kb/total_rss*100:.1f}%</td></tr>'
+            html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#4BC0C0;border-radius:2px;"></span></td><td>共享库</td><td>{self._format_kb(lib_rss_kb)}</td><td>{lib_rss_kb/total_rss*100:.1f}%</td></tr>'
+            html += f'<tr><td style="padding-left:15px;"><span style="display:inline-block;width:10px;height:10px;background:#9B59B6;border-radius:2px;"></span></td><td>文件映射</td><td>{self._format_kb(file_mmap_rss_kb)}</td><td>{file_mmap_rss_kb/total_rss*100:.1f}%</td></tr>'
             
             # 调试信息：exe_path
             html += f'<tr><td colspan="4" style="font-size:10px;color:#999;padding-left:15px;">exe_path: {exe_path or "N/A"}</td></tr>'
@@ -675,47 +667,82 @@ class MemoryAnalysisGenerator(BaseHtmlGenerator):
             # JavaScript数据
             html += f'<script>var procMemPieData = {{labels: {pie_labels}, values: {pie_values}, colors: {pie_colors}, hoverLabels: {pie_hover}}};</script>'
 
-        # 详细字段表格
-        html += '<details style="margin-top:15px;"><summary style="cursor:pointer;padding:8px;background:#f5f5f5;border-radius:5px;">进程内存详细字段</summary>'
-        html += '<table style="width:100%;font-size:12px;margin-top:10px;"><thead><tr><th>类型</th><th>大小</th><th>说明</th></tr></thead><tbody>'
-        detail_items = [
-            ('VmRSS', vm_rss_kb, '物理内存使用（常驻集大小）'),
-            ('RssAnon', rss_anon, '匿名映射内存'),
-            ('RssFile', rss_file, '文件映射内存'),
-            ('VmData', vm_data_kb, '数据段大小（堆）'),
-            ('VmStk', proc_mem.get('VmStk', 0), '栈大小'),
-            ('VmExe', proc_mem.get('VmExe', 0), '代码段大小'),
-            ('VmLib', proc_mem.get('VmLib', 0), '共享库大小'),
-            ('VmPeak', vm_peak_kb, '峰值虚拟内存'),
-            ('VmSwap', vm_swap_kb, '交换到磁盘的内存'),
-        ]
-        for name, value, desc in detail_items:
-            if value > 0:
-                html += f'<tr><td>{name}</td><td>{self._format_kb(value)}</td><td style="color:#666;">{desc}</td></tr>'
+        # 虚拟内存分布
+        vm_data_kb = proc_mem.get('VmData', 0)
+        vm_stk_kb = proc_mem.get('VmStk', 0)
+        vm_exe_kb = proc_mem.get('VmExe', 0)
+        vm_lib_kb = proc_mem.get('VmLib', 0)
+        vm_total_kb = proc_mem.get('VmSize', proc_mem.get('VmPeak', vm_data_kb + vm_stk_kb + vm_exe_kb + vm_lib_kb))
+        
+        if vm_total_kb > 0:
+            html += '<h4>进程虚拟内存分布</h4>'
+            html += '<p style="color:#666;font-size:12px;margin-bottom:10px;">包含关系: VmSize = VmData + VmStk + VmExe + VmLib + 其他</p>'
+            html += '<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start;">'
+            html += '<div style="flex:1;min-width:280px;">'
+            html += '<canvas id="procVmPieChart"></canvas>'
+            html += '</div>'
+            html += '<div style="flex:1;min-width:280px;">'
+            html += '<table style="width:100%;font-size:12px;">'
+            
+            # 子项明细
+            html += '<tr><td colspan="4" style="font-weight:bold;background:#f0f0f0;padding:5px;">子项明细</td></tr>'
+            if vm_data_kb > 0:
+                html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#FF6384;border-radius:2px;"></span></td><td>堆(Heap)</td><td>{self._format_kb(vm_data_kb)}</td><td>{vm_data_kb/vm_total_kb*100:.1f}%</td></tr>'
+            if vm_stk_kb > 0:
+                html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#FF9F40;border-radius:2px;"></span></td><td>栈(Stack)</td><td>{self._format_kb(vm_stk_kb)}</td><td>{vm_stk_kb/vm_total_kb*100:.1f}%</td></tr>'
+            if vm_exe_kb > 0:
+                html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#36A2EB;border-radius:2px;"></span></td><td>代码段</td><td>{self._format_kb(vm_exe_kb)}</td><td>{vm_exe_kb/vm_total_kb*100:.1f}%</td></tr>'
+            if vm_lib_kb > 0:
+                html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#4BC0C0;border-radius:2px;"></span></td><td>共享库</td><td>{self._format_kb(vm_lib_kb)}</td><td>{vm_lib_kb/vm_total_kb*100:.1f}%</td></tr>'
+            
+            # 虚拟内存总和
+            vm_known = vm_data_kb + vm_stk_kb + vm_exe_kb + vm_lib_kb
+            if vm_total_kb > vm_known:
+                vm_other_kb = vm_total_kb - vm_known
+                html += f'<tr><td style="width:12px;"><span style="display:inline-block;width:12px;height:12px;background:#9B59B6;border-radius:2px;"></span></td><td>其他虚拟内存</td><td>{self._format_kb(vm_other_kb)}</td><td>{vm_other_kb/vm_total_kb*100:.1f}%</td></tr>'
+            
+            html += '</table>'
+            html += '</div>'
+            html += '</div>'
+            
+            # 虚拟内存饼图数据
+            vm_pie_labels = []
+            vm_pie_values = []
+            vm_pie_colors = []
+            vm_pie_hover = []
+            
+            if vm_data_kb > 0:
+                vm_pie_labels.append('堆(Heap)')
+                vm_pie_values.append(vm_data_kb)
+                vm_pie_colors.append('#FF6384')
+                vm_pie_hover.append(f'堆(Heap): {self._format_kb(vm_data_kb)}')
+            if vm_stk_kb > 0:
+                vm_pie_labels.append('栈(Stack)')
+                vm_pie_values.append(vm_stk_kb)
+                vm_pie_colors.append('#FF9F40')
+                vm_pie_hover.append(f'栈(Stack): {self._format_kb(vm_stk_kb)}')
+            if vm_exe_kb > 0:
+                vm_pie_labels.append('代码段')
+                vm_pie_values.append(vm_exe_kb)
+                vm_pie_colors.append('#36A2EB')
+                vm_pie_hover.append(f'代码段: {self._format_kb(vm_exe_kb)}')
+            if vm_lib_kb > 0:
+                vm_pie_labels.append('共享库')
+                vm_pie_values.append(vm_lib_kb)
+                vm_pie_colors.append('#4BC0C0')
+                vm_pie_hover.append(f'共享库: {self._format_kb(vm_lib_kb)}')
+            if vm_total_kb > vm_known:
+                vm_pie_labels.append('其他虚拟内存')
+                vm_pie_values.append(vm_total_kb - vm_known)
+                vm_pie_colors.append('#9B59B6')
+                vm_pie_hover.append(f'其他虚拟内存: {self._format_kb(vm_total_kb - vm_known)}')
+            
+            html += f'<script>var procVmPieData = {{labels: {vm_pie_labels}, values: {vm_pie_values}, colors: {vm_pie_colors}, hoverLabels: {vm_pie_hover}}};</script>'
 
-        # PSS额外信息
-        if smaps_rollup and pss_kb > 0:
-            swap_kb = smaps_rollup.get('swap', 0)
-            anon_huge = smaps_rollup.get('anon_huge_pages', 0)
-            if swap_kb > 0 or anon_huge > 0:
-                html += '<tr style="background:#f9f9f9;"><td colspan="3"><strong>PSS额外信息</strong></td></tr>'
-                if swap_kb > 0:
-                    html += f'<tr><td>Swap</td><td>{self._format_kb(swap_kb)}</td><td style="color:#666;">换出到swap的内存</td></tr>'
-                if anon_huge > 0:
-                    html += f'<tr><td>AnonHugePages</td><td>{self._format_kb(anon_huge)}</td><td style="color:#666;">透明大页（THP）内存</td></tr>'
-
-        html += '</tbody></table></details>'
+        # 详细字段表格已移除
 
         if vmstat_data:
-            html += '<h3>虚拟内存活动</h3>'
-            html += '<div class="grid">'
-            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("r", "N/A")}</div><div class="label">运行中进程</div></div>'
-            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("b", "N/A")}</div><div class="label">阻塞进程</div></div>'
-            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("si", 0)} KB/s</div><div class="label">Swap换入</div></div>'
-            html += f'<div class="stat-box"><div class="value">{vmstat_data.get("so", 0)} KB/s</div><div class="label">Swap换出</div></div>'
-            html += '</div>'
-
-        html += self._generate_memory_suggestions(sys_mem, proc_mem, vmstat_data, smaps_rollup)
+            html += self._generate_memory_suggestions(sys_mem, proc_mem, vmstat_data, smaps_rollup)
         html += """        </section>
         """
         return html

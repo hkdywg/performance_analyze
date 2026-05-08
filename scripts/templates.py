@@ -744,6 +744,49 @@ CHART_JS_SCRIPT = '''
                 });
             }
         }
+
+        // 进程虚拟内存饼图
+        if (typeof procVmPieData !== 'undefined' && procVmPieData.labels && procVmPieData.labels.length > 0) {
+            const vmPieCtx = document.getElementById('procVmPieChart');
+            if (vmPieCtx) {
+                new Chart(vmPieCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: procVmPieData.labels,
+                        datasets: [{
+                            data: procVmPieData.values,
+                            backgroundColor: procVmPieData.colors,
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: {
+                                    boxWidth: 12,
+                                    padding: 8,
+                                    font: { size: 11 }
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                        const value = context.raw;
+                                        const pct = ((value / total) * 100).toFixed(1);
+                                        const mb = (value / 1024).toFixed(2);
+                                        return `${context.label}: ${mb} MB (${pct}%)`;
+                                    }
+                                }
+                            }
+                        },
+                        cutout: '40%',
+                    }
+                });
+            }
+        }
     });
     </script>
 '''
