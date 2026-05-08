@@ -23,20 +23,15 @@
 ## 项目结构
 
 ```
-performance/
-├── SKILL.md                      # Linux系统性能分析Skill
-├── SKILL_GRAPHICS.md            # 图形分析Skill（用于Cursor AI）
+performance_analyize/
 ├── README.md                    # 本文件
 ├── config/
-│   ├── config.yaml              # 配置文件
-│   └── config.yaml.example      # 配置示例
+│   └── config.yaml              # 配置文件
 ├── scripts/
-│   ├── analyze_remote.sh         # 远程数据采集脚本
-│   ├── generate_report.py       # 报告生成器
-│   ├── report_generator.py      # 报告生成器（主程序）
-│   ├── config.py                # 配置加载模块
-│   ├── upload_data.py           # 数据上传脚本
-│   ├── generators/             # HTML生成器模块
+│   ├── analyze_remote.sh        # 远程数据采集脚本
+│   ├── report_generator.py     # 报告生成器（主程序）
+│   ├── templates.py            # HTML模板
+│   ├── generators/              # HTML生成器模块
 │   │   ├── __init__.py
 │   │   ├── base.py              # 基础生成器
 │   │   ├── system.py            # 系统概览生成器
@@ -46,7 +41,7 @@ performance/
 │   │   ├── analysis.py          # I/O和锁分析生成器
 │   │   ├── proc_stat.py         # 进程stat生成器
 │   │   └── score.py             # 性能评分生成器
-│   └── analyzers/              # 数据分析模块
+│   └── analyzers/               # 数据分析模块
 │       ├── __init__.py
 │       ├── cpu.py
 │       ├── memory.py
@@ -56,14 +51,9 @@ performance/
 │       ├── graphics.py
 │       ├── flamegraph.py
 │       ├── syscall.py
-│       └── process_stat.py
-├── references/                  # 参考文档
-│   ├── cpu.md
-│   ├── memory.md
-│   ├── io.md
-│   ├── gpu.md
-│   ├── wayland.md
-│   └── embedded.md
+│       └── proc_stat.py
+├── doc/                         # 文档和资源
+│   └── execution_show.gif       # 操作演示动画
 └── FlameGraph/                  # 火焰图工具（可选，需自行下载）
 ```
 
@@ -87,8 +77,8 @@ performance/
 ```bash
 # 1. 克隆项目
 cd ~/ywg_workspace/prj
-git clone <repo-url> performance
-cd performance
+git clone <repo-url> performance_analyize
+cd performance_analyize
 
 # 2. 安装Python依赖
 pip3 install pyyaml paramiko
@@ -103,39 +93,58 @@ git clone https://github.com/brendangregg/FlameGraph.git
 
 ```yaml
 # SSH连接配置
-ssh_host: "192.168.1.100"       # 目标设备IP
-ssh_port: 22                    # SSH端口
-ssh_user: "root"                # SSH用户名
-ssh_key: "~/.ssh/id_rsa"       # SSH密钥路径（可选）
+ssh:
+  host: "172.29.4.201"           # 远程主机IP地址
+  port: 22                        # SSH端口
+  user: "root"                   # SSH用户名
+  password: "123456"             # SSH密码（留空则使用密钥）
+  key_path: "~/.ssh/id_rsa"      # SSH密钥路径
 
-# 目标应用配置
-app_name: "wayland-app"         # 应用名称（用于匹配进程）
-process_pattern: "wayland-app"  # 进程匹配模式（支持正则）
+# 目标应用程序配置
+target:
+  app_name: "dtcc"               # 应用程序名称
+  process_pattern: "dtcc*"       # 进程匹配模式（支持正则）
+  display_server: "drm"          # 显示服务器类型：wayland 或 drm
+  compositor: "weston"           # Compositor名称
 
-# 采集配置
-duration: 10                    # 采集持续时间（秒）
-display_server: "wayland"       # 显示服务器类型：wayland 或 drm
-compositor: "weston"            # Compositor名称
-
-# 输出配置
-output_dir: "./report"          # 输出目录
+# 分析参数配置
+analysis:
+  duration: 30                   # 采样持续时间（秒）
+  interval: 1                    # 采样间隔（秒）
+  output_dir: "./report"         # 报告输出目录
 ```
 
 ### 配置参数说明
 
+#### SSH配置
 | 参数 | 说明 | 必填 |
 |------|------|------|
-| ssh_host | 目标设备IP地址 | 是 |
-| ssh_port | SSH端口 | 否（默认22） |
-| ssh_user | SSH用户名 | 是 |
-| ssh_key | SSH私钥路径 | 否（可使用密码） |
-| app_name | 目标应用名称 | 是 |
-| process_pattern | 进程匹配模式（支持正则） | 是 |
-| duration | 采集持续时间（秒） | 否（默认10） |
-| display_server | 显示服务器类型 | 是 |
-| compositor | Compositor名称 | 否 |
+| ssh.host | 目标设备IP地址 | 是 |
+| ssh.port | SSH端口 | 否（默认22） |
+| ssh.user | SSH用户名 | 是 |
+| ssh.password | SSH密码 | 否（可使用密钥） |
+| ssh.key_path | SSH私钥路径 | 否 |
+
+#### 目标应用配置
+| 参数 | 说明 | 必填 |
+|------|------|------|
+| target.app_name | 目标应用名称 | 是 |
+| target.process_pattern | 进程匹配模式（支持正则） | 是 |
+| target.display_server | 显示服务器类型 | 是 |
+| target.compositor | Compositor名称 | 否 |
+
+#### 分析配置
+| 参数 | 说明 | 必填 |
+|------|------|------|
+| analysis.duration | 采集持续时间（秒） | 否（默认10） |
+| analysis.interval | 采样间隔（秒） | 否（默认1） |
+| analysis.output_dir | 输出目录 | 否（默认./report） |
 
 ## 使用方法
+
+### 操作演示
+
+![执行演示](doc/execution_show.gif)
 
 ### 完整分析流程
 
@@ -144,10 +153,10 @@ output_dir: "./report"          # 输出目录
 vim config/config.yaml
 
 # 2. 运行数据采集（需要SSH连接）
-./scripts/analyze_remote.sh -c config/config.yaml
+./scripts/analyze_remote.sh
 
-# 3. 生成HTML报告
-python3 scripts/generate_report.py -d ./report
+# 3. 生成HTML报告（自动执行）
+# 报告将输出到 report/ 目录
 
 # 4. 查看报告
 # 使用浏览器打开 report/report.html
@@ -156,15 +165,14 @@ python3 scripts/generate_report.py -d ./report
 ### 单独使用各模块
 
 ```bash
-# 仅采集数据
+# 仅采集数据（使用默认配置）
+./scripts/analyze_remote.sh
+
+# 指定配置文件
 ./scripts/analyze_remote.sh -c config/config.yaml
 
-# 仅生成报告
-python3 scripts/generate_report.py -d ./report
-
-# 使用不同配置
-./scripts/analyze_remote.sh -c config/production.yaml
-python3 scripts/generate_report.py -d ./report -o report_prod.html
+# 查看帮助
+./scripts/analyze_remote.sh -h
 ```
 
 ### SSH密钥配置（免密码登录）
@@ -174,10 +182,10 @@ python3 scripts/generate_report.py -d ./report -o report_prod.html
 ssh-keygen -t rsa
 
 # 复制公钥到目标设备
-ssh-copy-id root@192.168.1.100
+ssh-copy-id root@172.29.4.201
 
 # 测试连接
-ssh root@192.168.1.100 "echo 'Connection OK'"
+ssh root@172.29.4.201 "echo 'Connection OK'"
 ```
 
 ## 采集的数据
@@ -319,7 +327,8 @@ bitbake linux-yocto -c populate_sysroot
 修改config.yaml中的process_pattern：
 
 ```yaml
-process_pattern: "app1|app2|app3"  # 使用正则匹配多个进程
+target:
+  process_pattern: "app1|app2|app3"  # 使用正则匹配多个进程
 ```
 
 ## 高级用法
@@ -328,8 +337,9 @@ process_pattern: "app1|app2|app3"  # 使用正则匹配多个进程
 
 ```bash
 # 修改配置文件使用非root用户
-ssh_user: "devel"
-ssh_key: "/home/user/.ssh/id_rsa"
+ssh:
+  user: "devel"
+  key_path: "/home/user/.ssh/id_rsa"
 ```
 
 > 注意：非root用户的perf功能受限
@@ -337,25 +347,22 @@ ssh_key: "/home/user/.ssh/id_rsa"
 ### 自定义采集时间
 
 ```bash
-# 采集30秒数据
-duration: 30  # 在config.yaml中设置
+# 采集60秒数据（在config.yaml中设置）
+analysis:
+  duration: 60
 
 # 或通过命令行参数
-./scripts/analyze_remote.sh -c config/config.yaml -t 30
+./scripts/analyze_remote.sh -t 60
 ```
 
 ### 生成对比报告
 
 ```bash
 # 采集优化前的数据
-./scripts/analyze_remote.sh -c config/config.yaml -o ./report_before
+./scripts/analyze_remote.sh -o ./report_before
 
 # 采集优化后的数据
-./scripts/analyze_remote.sh -c config/config.yaml -o ./report_after
-
-# 生成两个报告进行对比
-python3 scripts/generate_report.py -d ./report_before -o report_before.html
-python3 scripts/generate_report.py -d ./report_after -o report_after.html
+./scripts/analyze_remote.sh -o ./report_after
 ```
 
 ## 参考资料
